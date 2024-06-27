@@ -8,6 +8,7 @@ import rotation_utils
 import gptq_utils
 import eval_utils
 import hadamard_utils
+from finetuning_utils import do_finetuning
 
 
 def main():
@@ -61,7 +62,7 @@ def main():
                 )
                 qlayers[name].fp32_had = args.fp32_had
     elif args.rotate_mode == "learnable":
-        rotation_utils.fuse_rotation_to_weight(model, args)
+        # rotation_utils.fuse_rotation_to_weight(model, args)
         utils.cleanup_memory(verbos=True)
         quant_utils.add_actquant(model)  # Add Activation Wrapper to the model
 
@@ -107,7 +108,8 @@ def main():
                 sym=layer_a_sym,
                 clip_ratio=layer_a_clip,
             )
-
+    if args.rotate_mode == "learnable":
+        do_finetuning(model, args)
     if args.w_bits < 16:
         save_dict = {}
         if args.load_qmodel_path:  # Load Quantized Rotated Model

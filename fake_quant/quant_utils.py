@@ -6,6 +6,13 @@ import hadamard_utils
 import fast_hadamard_transform
 
 
+def round_pass(x):
+    # straight through estimator for round function
+    y = x.round()
+    y_grad = x
+    return y.detach() - y_grad.detach() + y_grad
+
+
 def get_minq_maxq(bits, sym):
     if sym:
         maxq = torch.tensor(2 ** (bits - 1) - 1)
@@ -20,7 +27,7 @@ def get_minq_maxq(bits, sym):
 def asym_quant(x, scale, zero, maxq):
     scale = scale.to(x.device)
     zero = zero.to(x.device)
-    q = torch.clamp(torch.round(x / scale) + zero, 0, maxq)
+    q = torch.clamp(round_pass(x / scale) + zero, 0, maxq)
     return q, scale, zero
 
 
@@ -34,7 +41,7 @@ def asym_quant_dequant(x, scale, zero, maxq):
 
 def sym_quant(x, scale, maxq):
     scale = scale.to(x.device)
-    q = torch.clamp(torch.round(x / scale), -(maxq + 1), maxq)
+    q = torch.clamp(round_pass(x / scale), -(maxq + 1), maxq)
     return q, scale
 
 
@@ -148,7 +155,7 @@ class ActQuantizer(torch.nn.Module):
             xmin[tmp] = -1
             xmax[tmp] = +1
             self.scale = (xmax - xmin) / self.maxq
-            self.zero = torch.round(-xmin / self.scale)
+            self.zero = round_pass(-xmin / self.scale)
 
         self.scale = self.scale.repeat(1, 1, 1, self.groupsize).reshape(init_shape)
         self.zero = self.zero.repeat(1, 1, 1, self.groupsize).reshape(init_shape)
@@ -185,7 +192,7 @@ class ActQuantizer(torch.nn.Module):
             xmin[tmp] = -1
             xmax[tmp] = +1
             self.scale = (xmax - xmin) / self.maxq
-            self.zero = torch.round(-xmin / self.scale)
+            self.zero = round_pass(-xmin / self.scale)
 
             self.scale = (
                 self.scale.unsqueeze(1)
@@ -354,7 +361,7 @@ class WeightQuantizer(torch.nn.Module):
             xmin[tmp] = -1
             xmax[tmp] = +1
             self.scale = (xmax - xmin).clamp(min=1e-5) / self.maxq
-            self.zero = torch.round(-xmin / self.scale)
+            self.zero = round_pass(-xmin / self.scale)
 
         if self.mse:
             best = torch.full([x.shape[0]], float("inf"), device=dev)
@@ -370,7 +377,7 @@ class WeightQuantizer(torch.nn.Module):
                 else:
 
                     scale1 = (xmax1 - xmin1) / self.maxq
-                    zero1 = torch.round(-xmin1 / scale1)
+                    zero1 = round_pass(-xmin1 / scale1)
                     q = asym_quant_dequant(
                         x, scale1.unsqueeze(1), zero1.unsqueeze(1), self.maxq
                     )

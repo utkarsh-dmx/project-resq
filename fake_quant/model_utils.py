@@ -51,7 +51,7 @@ def get_llama(model_name, hf_token, learnable_rot):
     if learnable_rot:
         model = modeling_llama.LlamaForCausalLM.from_pretrained(
             model_name,
-            torch_dtype=torch.float16,
+            torch_dtype=torch.float32,
             use_auth_token=hf_token,
             # low_cpu_mem_usage=True,
         )

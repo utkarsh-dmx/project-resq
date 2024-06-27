@@ -179,11 +179,11 @@ class LlamaAttention(nn.Module):
         )
         self.fused = False  # if rotation matrix has been fused to weight
         self.rot_2 = torch.nn.Parameter(
-            torch.eye(self.head_dim, dtype=torch.float16)
+            torch.eye(self.head_dim)
         )  # per head rotation for quantizing value
-        self.rot_3 = torch.nn.Parameter(
-            torch.eye(self.head_dim, dtype=torch.float16)
-        )  # per head rotation for quantizing key and query
+        # self.rot_3 = torch.nn.Parameter(
+        #     torch.eye(self.head_dim, dtype=torch.float16)
+        # )  # per head rotation for quantizing key and query
 
         self.fused = False  # if rotation matrix has been fused to weight
 
@@ -891,13 +891,13 @@ class LlamaPreTrainedModel(PreTrainedModel):
                 module.rot_2.data.copy_(
                     random_hadamard_matrix(
                         module.rot_2.data.shape[0], module.rot_2.device
-                    ).to(torch.float16)
+                    )
                 )
-                module.rot_3.data.copy_(
-                    random_hadamard_matrix(
-                        module.rot_3.data.shape[0], module.rot_3.device
-                    ).to(torch.float16)
-                )
+                # module.rot_3.data.copy_(
+                #     random_hadamard_matrix(
+                #         module.rot_3.data.shape[0], module.rot_3.device
+                #     )
+                # )
 
         elif isinstance(module, LlamaMLP):
             if rot_init == "identity":
@@ -908,7 +908,7 @@ class LlamaPreTrainedModel(PreTrainedModel):
                 module.rot_4.data.copy_(
                     random_hadamard_matrix(
                         module.rot_4.data.shape[0], module.rot_4.device
-                    ).to(torch.float16)
+                    )
                 )
 
         elif isinstance(module, LlamaModel):
@@ -920,7 +920,7 @@ class LlamaPreTrainedModel(PreTrainedModel):
                 module.rot_1.data.copy_(
                     random_hadamard_matrix(
                         module.rot_1.data.shape[0], module.rot_1.device
-                    ).to(torch.float16)
+                    )
                 )
 
 
@@ -1030,9 +1030,7 @@ class LlamaModel(LlamaPreTrainedModel):
         # self.rot_1 = nn.Parameter(
         #     torch.eye(config.hidden_size, dtype=torch.float16), requires_grad=True
         # )
-        self.rot_1 = nn.Parameter(
-            torch.eye(config.hidden_size, dtype=torch.float16), requires_grad=True
-        )
+        self.rot_1 = nn.Parameter(torch.eye(config.hidden_size), requires_grad=True)
 
         self.gradient_checkpointing = False
         # Initialize weights and apply final processing
