@@ -396,77 +396,30 @@ def fuse_rotation_to_weight(model, args):
         tqdm.tqdm(layers, unit="layer", desc="Fusing Rotations to weights")
     ):
         layer = layers[idx].to(utils.DEV)
-        # Q,K,V,O in self attn
-        w = layer.self_attn.q_proj.weight.data
-        pre = layer.self_attn.q_proj.pre_rotation
-        post = layer.self_attn.q_proj.post_rotation
-        if pre is not None:
-            w = w @ pre.to(w.device)
-        if post is not None:
-            w = post.to(w.device) @ w
-        layer.self_attn.q_proj.weight.data.copy_(w)
+        # Q,K,V,O in self attn, up,down,gate in MLP
+        layer_list = [
+            layer.self_attn.q_proj.module,
+            layer.self_attn.k_proj.module,
+            layer.self_attn.v_proj.module,
+            layer.self_attn.o_proj.module,
+            layer.mlp.gate_proj.module,
+            layer.mlp.up_proj.module,
+            layer.mlp.down_proj.module,
+        ]
+        for this_layer in layer_list:
+            w = this_layer.weight.data
+            pre = this_layer.pre_rotation
+            post = this_layer.post_rotation
+            if pre is not None:
+                w = w @ pre.to(w.device).to(w.dtype)
+            if post is not None:
+                w = post.to(w.device).to(w.dtype) @ w
+            this_layer.weight.data.copy_(w)
 
-        w = layer.self_attn.k_proj.weight.data
-        pre = layer.self_attn.k_proj.pre_rotation
-        post = layer.self_attn.k_proj.post_rotation
-        if pre is not None:
-            w = w @ pre.to(w.device)
-        if post is not None:
-            w = post.to(w.device) @ w
-        layer.self_attn.k_proj.weight.data.copy_(w)
-
-        w = layer.self_attn.v_proj.weight.data
-        pre = layer.self_attn.v_proj.pre_rotation
-        post = layer.self_attn.v_proj.post_rotation
-        if pre is not None:
-            w = w @ pre.to(w.device)
-        if post is not None:
-            w = post.to(w.device) @ w
-        layer.self_attn.v_proj.weight.data.copy_(w)
-
-        w = layer.self_attn.o_proj.weight.data
-        pre = layer.self_attn.o_proj.pre_rotation
-        post = layer.self_attn.o_proj.post_rotation
-        if pre is not None:
-            w = w @ pre.to(w.device)
-        if post is not None:
-            w = post.to(w.device) @ w
-        layer.self_attn.o_proj.weight.data.copy_(w)
-
-        # layer.self_attn.rot_2 = None
         layer.self_attn.fused = True
-
-        # MLP
-        w = layer.mlp.gate_proj.weight.data
-        pre = layer.mlp.gate_proj.pre_rotation
-        post = layer.mlp.gate_proj.post_rotation
-        if pre is not None:
-            w = w @ pre.to(w.device)
-        if post is not None:
-            w = post.to(w.device) @ w
-        layer.mlp.gate_proj.weight.data.copy_(w)
-
-        w = layer.mlp.up_proj.weight.data
-        pre = layer.mlp.up_proj.pre_rotation
-        post = layer.mlp.up_proj.post_rotation
-        if pre is not None:
-            w = w @ pre.to(w.device)
-        if post is not None:
-            w = post.to(w.device) @ w
-        layer.mlp.up_proj.weight.data.copy_(w)
-
-        w = layer.mlp.down_proj.weight.data
-        pre = layer.mlp.down_proj.pre_rotation
-        post = layer.mlp.down_proj.post_rotation
-        if pre is not None:
-            w = w @ pre.to(w.device)
-        if post is not None:
-            w = post.to(w.device) @ w
-        layer.mlp.down_proj.weight.data.copy_(w)
-
         layer.mlp.fused = True
 
-        layer.cpu()
+        layers[idx] = layer.cpu()
 
 
 def fuse_ov_proj(layer, model_type, head_num, head_dim):

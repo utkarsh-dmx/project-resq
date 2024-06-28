@@ -800,7 +800,6 @@ class LlamaDecoderLayer(nn.Module):
         residual = hidden_states
 
         hidden_states = self.input_layernorm(hidden_states)
-        breakpoint()
         # Self Attention
         hidden_states, self_attn_weights, present_key_value = self.self_attn(
             hidden_states=hidden_states,
@@ -868,7 +867,6 @@ class LlamaPreTrainedModel(PreTrainedModel):
         std = self.config.initializer_range
         # rot_init = self.config.rotation_initialization
         rot_init = "hadamard"
-
         if isinstance(module, nn.Linear):
             module.weight.data.normal_(mean=0.0, std=std)
             if module.bias is not None:
@@ -1143,7 +1141,6 @@ class LlamaModel(LlamaPreTrainedModel):
         all_hidden_states = () if output_hidden_states else None
         all_self_attns = () if output_attentions else None
         next_decoder_cache = None
-        breakpoint()
         for decoder_layer in self.layers:
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)

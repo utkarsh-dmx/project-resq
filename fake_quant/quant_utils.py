@@ -437,10 +437,10 @@ class RotLinear(torch.nn.Linear):
         weight = self.weight
         bias = self.bias
         if pre_rotation is not None:
-            self.pre_rotation = pre_rotation
+            self.pre_rotation = pre_rotation.detach()
             weight = weight @ pre_rotation
         if post_rotation is not None:
-            self.post_rotation = post_rotation
+            self.post_rotation = post_rotation.detach()
             weight = torch.matmul(post_rotation, weight)
         out = torch.nn.functional.linear(input, weight, None, **self.fwd_kwargs)
 

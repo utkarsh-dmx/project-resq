@@ -155,7 +155,7 @@ def evaluator(model, testenc, dev, args):
     if args.rotate_mode == "learnable":
         for j in range(nbatches):
             inps[j] = torch.matmul(inps[j], rot_1.t())
-        model.model.rot_1 = model.model.rot_1.cpu()
+        # model.model.rot_1 = model.model.rot_1.cpu()
 
     if opt_type:
         if model.model.decoder.final_layer_norm is not None:
