@@ -72,9 +72,7 @@ class LlamaMLP(nn.Module):
             bias=False,
         )
 
-        self.rot_4 = nn.Parameter(
-            torch.eye(self.intermediate_size, dtype=torch.float16), requires_grad=True
-        )
+        self.rot_4 = nn.Parameter(torch.eye(self.intermediate_size), requires_grad=True)
         self.act_fn = ACT2FN[config.hidden_act]
         self.fused = False  # if rotation matrix has been fused to weight
 
@@ -802,7 +800,7 @@ class LlamaDecoderLayer(nn.Module):
         residual = hidden_states
 
         hidden_states = self.input_layernorm(hidden_states)
-
+        breakpoint()
         # Self Attention
         hidden_states, self_attn_weights, present_key_value = self.self_attn(
             hidden_states=hidden_states,
@@ -1145,7 +1143,7 @@ class LlamaModel(LlamaPreTrainedModel):
         all_hidden_states = () if output_hidden_states else None
         all_self_attns = () if output_attentions else None
         next_decoder_cache = None
-
+        breakpoint()
         for decoder_layer in self.layers:
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
@@ -1154,6 +1152,7 @@ class LlamaModel(LlamaPreTrainedModel):
                 layer_outputs = self._gradient_checkpointing_func(
                     decoder_layer.__call__,
                     hidden_states,
+                    self.rot_1,
                     attention_mask,
                     position_ids,
                     past_key_values,

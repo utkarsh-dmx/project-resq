@@ -36,7 +36,7 @@ def main():
         hf_token=args.hf_token,
         eval_mode=True,
     )
-    dataset_ppl = eval_utils.evaluator(model, testloader, utils.DEV, args)
+    # dataset_ppl = eval_utils.evaluator(model, testloader, utils.DEV, args)
 
     # Rotate the weights
     if args.rotate and not args.rotate_mode == "learnable":

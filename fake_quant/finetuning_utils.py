@@ -27,7 +27,7 @@ def do_finetuning(model, args):
     ds = load_dataset("tatsu-lab/alpaca")
     ds = ds.remove_columns(["input", "output", "instruction"])
     traindata = ds["train"]
-
+    # model.config.use_cache = False
     model.config.use_cache = False
     set_trainable_params(model)
 
@@ -73,7 +73,7 @@ def do_finetuning(model, args):
         packing=False,
         max_seq_length=2048,
     )
-
+    breakpoint()
     start_time = perf_counter()
     trainer.train()
     end_time = perf_counter()
