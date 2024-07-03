@@ -5,6 +5,7 @@ import torch
 import os
 import logging
 from tqdm import tqdm
+from modeling_llama import create_orthogonal
 
 
 @torch.no_grad()
@@ -47,6 +48,7 @@ def evaluator(model, testenc, dev, args):
         if args.rotate_mode == "learnable":
             # model.model.rot_1 = model.model.rot_1.to(dev)
             rot_1 = model.model.rot_1.to(dev)
+            rot_1 = create_orthogonal(rot_1)
 
     layers[0] = layers[0].to(dev)
 

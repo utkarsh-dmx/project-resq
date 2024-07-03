@@ -49,19 +49,19 @@ class CustomTrainer(SFTTrainer):
             loss = outputs["loss"] if isinstance(outputs, dict) else outputs[0]
 
         # Orthogonality loss
-        loss_2 = 0.0
-        for n, p in model.named_parameters():
-            if "rot" in n:
-                ones = torch.ones(p.shape[0], device=p.device)
-                # loss_2 += torch.dist(p @ p.t(), torch.eye(p.shape[0]).to(p.device))
-                loss_2 += torch.norm((p @ p.t()) - torch.diag(ones), "fro")
-        loss = loss + loss_2
+        # loss_2 = 0.0
+        # for n, p in model.named_parameters():
+        #     if "rot_1" in n:
+        #         ones = torch.ones(p.shape[0], device=p.device)
+        #         # loss_2 += torch.dist(p @ p.t(), torch.eye(p.shape[0]).to(p.device))
+        #         loss_2 += torch.norm((p @ p.t()) - torch.diag(ones), "fro")
+        # loss = loss + 0.001 * loss_2
         return (loss, outputs) if return_outputs else loss
 
 
 def set_trainable_params(model):
     for n, p in model.named_parameters():
-        if "rot" in n:
+        if "rot_1" in n:
             p.requires_grad = True
         else:
             p.requires_grad = False
@@ -71,9 +71,11 @@ def set_trainable_params(model):
 
 def do_finetuning(model, args):
     # get alpaca dataset for finetuning
-    ds = load_dataset("tatsu-lab/alpaca")
-    ds = ds.remove_columns(["input", "output", "instruction"])
-    traindata = ds["train"]
+    # ds = load_dataset("tatsu-lab/alpaca")
+    # ds = ds.remove_columns(["input", "output", "instruction"])
+    # traindata = ds["train"]
+    traindata = load_dataset("wikitext", "wikitext-2-raw-v1", split="train")
+    evaldata = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
     # model.config.use_cache = False
     use_cache = model.config.use_cache
     model.config.use_cache = False
@@ -103,12 +105,12 @@ def do_finetuning(model, args):
         save_strategy="no",
         logging_steps=10,
         num_train_epochs=1,
-        max_steps=10,
+        max_steps=50,
         fp16=True,
         push_to_hub=False,
         gradient_checkpointing=True,
+        load_best_model_at_end=True,
     )
-
     # creating trainer with the training agruments
     # model.gradient_checkpointing_enable()
     trainer = CustomTrainer(
@@ -119,6 +121,7 @@ def do_finetuning(model, args):
         tokenizer=tokenizer,  # tokenizer
         packing=False,
         max_seq_length=2048,
+        eval_dataset=evaldata,
     )
     start_time = perf_counter()
     trainer.train()
@@ -129,7 +132,6 @@ def do_finetuning(model, args):
     model.eval()
     model.config.use_cache = use_cache
     set_model_to_float16(model)
-    breakpoint()
 
 
 def set_model_to_float16(model):

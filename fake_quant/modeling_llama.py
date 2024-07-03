@@ -44,6 +44,7 @@ from transformers.models.llama.modeling_llama import *
 from hadamard_utils import random_hadamard_matrix
 from quant_utils import RotLinear
 
+
 logger = logging.get_logger(__name__)
 
 _CONFIG_FOR_DOC = "LlamaConfig"
@@ -105,16 +106,17 @@ class LlamaMLP(nn.Module):
             ]
             down_proj = sum(down_proj)
         else:
+            # rot_1 guaranteed to be orthogonal so its inverse is transpose
             gate = self.act_fn(
                 self.gate_proj(x, pre_rotation=rot_1 if not self.fused else None)
             )
             up = self.up_proj(x, pre_rotation=rot_1 if not self.fused else None)
             intermediate_act = gate * up
-
             # on the fly rotation 4
             intermediate_act = torch.matmul(intermediate_act, self.rot_4)
             down_proj = self.down_proj(
                 intermediate_act,
+                # pre_rotation=torch.inverse(self.rot_4).t() if not self.fused else None,
                 pre_rotation=self.rot_4 if not self.fused else None,
                 post_rotation=rot_1.t() if not self.fused else None,
             )
@@ -356,6 +358,7 @@ class LlamaAttention(nn.Module):
                         torch.eye(self.num_heads, dtype=torch.float16).to(
                             self.rot_2.device
                         ),
+                        # torch.inverse(self.rot_2).t(),
                         self.rot_2,
                     )
                     if not self.fused
@@ -647,12 +650,15 @@ class LlamaSdpaAttention(LlamaAttention):
             )
 
         bsz, q_len, _ = hidden_states.size()
+        # rot_1 guaranteed to be orthogonal so its inverse is transpose
 
         query_states = self.q_proj(
-            hidden_states, pre_rotation=rot_1 if not self.fused else None
+            hidden_states,
+            pre_rotation=rot_1 if not self.fused else None,
         )
         key_states = self.k_proj(
-            hidden_states, pre_rotation=rot_1 if not self.fused else None
+            hidden_states,
+            pre_rotation=rot_1 if not self.fused else None,
         )
         value_states = self.v_proj(
             hidden_states,
@@ -736,14 +742,13 @@ class LlamaSdpaAttention(LlamaAttention):
                     torch.eye(self.num_heads, dtype=torch.float16).to(
                         self.rot_2.device
                     ),
-                    self.rot_2,
+                    torch.inverse(self.rot_2).t(),
                 )
                 if not self.fused
                 else None
             ),
             post_rotation=rot_1.t() if not self.fused else None,
         )
-        # attn_output = self.o_proj(attn_output)
 
         return attn_output, None, past_key_value
 
@@ -889,6 +894,12 @@ class LlamaPreTrainedModel(PreTrainedModel):
                         module.rot_2.data.shape[0], module.rot_2.device
                     )
                 )
+                # module.rot_2.data.copy_(
+                #     torch.randn(
+                #         size=module.rot_2.data.shape, device=module.rot_2.device
+                #     )
+                # )
+
                 # module.rot_3.data.copy_(
                 #     random_hadamard_matrix(
                 #         module.rot_3.data.shape[0], module.rot_3.device
@@ -906,6 +917,11 @@ class LlamaPreTrainedModel(PreTrainedModel):
                         module.rot_4.data.shape[0], module.rot_4.device
                     )
                 )
+                # module.rot_4.data.copy_(
+                #     torch.randn(
+                #         size=module.rot_4.data.shape, device=module.rot_4.device
+                #     )
+                # )
 
         elif isinstance(module, LlamaModel):
             if rot_init == "identity":
@@ -913,11 +929,17 @@ class LlamaPreTrainedModel(PreTrainedModel):
                     torch.eye(module.rot_1.data.shape[0], dtype=torch.float16)
                 )
             elif rot_init == "hadamard":
-                module.rot_1.data.copy_(
-                    random_hadamard_matrix(
-                        module.rot_1.data.shape[0], module.rot_1.device
-                    )
+                had = random_hadamard_matrix(
+                    module.rot_1.data.shape[0], module.rot_1.device
                 )
+                # module.rot_1.data.copy_(get_orthogonal_inverse(had))
+                module.rot_1.data.copy_(had)
+
+                # module.rot_1.data.copy_(
+                #     torch.randn(
+                #         size=module.rot_1.data.shape, device=module.rot_1.device
+                #     )
+                # )
 
 
 LLAMA_INPUTS_DOCSTRING = r"""
@@ -998,6 +1020,54 @@ LLAMA_INPUTS_DOCSTRING = r"""
     "The bare LLaMA Model outputting raw hidden-states without any specific head on top.",
     LLAMA_START_DOCSTRING,
 )
+def create_orthogonal(rot):
+    """
+    helper function to convert any random matrix to orthogonal matrix. Leveraging Cayley transform
+        1. Convert input A to a skew symmetric matrix by sk_sm = (A - A.t())/2
+        2. Use cayley transform to convert skew symmetric matrix to orthogonal matrix orth = (I-A)((I+A)^-1)
+    """
+    dtype = rot.dtype
+    device = rot.device
+    sk_sm = 0.5 * (rot - rot.t())
+    eye = torch.eye(rot.shape[0], device=device, dtype=dtype)
+    p1 = eye - sk_sm
+    p2 = torch.inverse((eye + sk_sm).to(torch.float32)).to(dtype)
+    orth = torch.matmul(p1, p2)
+
+    return orth
+
+
+# def get_orthogonal_inverse(rot):
+#     """
+#     does exactly inverse of "create_orthogonal' function. Q = create_orthogonal(A); A = get_orthogonal_inverse(Q)
+#     """
+#     dtype = rot.dtype
+#     device = rot.device
+#     rot = rot.to(torch.float64)
+#     eye = torch.eye(rot.shape[0], device=device, dtype=torch.float64)
+#     rot = torch.linalg.solve(rot + eye, eye - rot)
+#     rot = -rot.triu(1)
+#     rot = rot.to(dtype)
+#     return rot
+
+
+# def create_orthogonal(rot):
+#     """
+#     helper function to convert any random matrix to orthogonal matrix. Leveraging Cayley transform
+#         1. Convert input A to a skew symmetric matrix by sk_sm = (A - A.t())
+#         2. Use cayley transform to convert skew symmetric matrix to orthogonal matrix orth = (I-A)((I+A)^-1)
+#     """
+#     dtype = rot.dtype
+#     device = rot.device
+#     rot = rot.to(torch.float64)
+#     sk_sm = rot.triu(1)
+#     sk_sm = sk_sm - sk_sm.transpose(-1, -2)
+#     eye = torch.eye(rot.shape[0], device=device, dtype=torch.float64)
+#     orth = torch.linalg.solve(eye - sk_sm, eye + sk_sm)
+#     orth = orth.to(dtype)
+#     return orth
+
+
 class LlamaModel(LlamaPreTrainedModel):
     """
     Transformer decoder consisting of *config.num_hidden_layers* layers. Each layer is a [`LlamaDecoderLayer`]
@@ -1128,8 +1198,8 @@ class LlamaModel(LlamaPreTrainedModel):
         hidden_states = inputs_embeds
 
         # rotate hidden states by rot_1
-        hidden_states = torch.matmul(hidden_states, self.rot_1.to(hidden_states.device))
-
+        rot_1 = create_orthogonal(self.rot_1.to(hidden_states.device))
+        hidden_states = torch.matmul(hidden_states, rot_1)
         if self.gradient_checkpointing and self.training:
             if use_cache:
                 logger.warning_once(
@@ -1149,7 +1219,7 @@ class LlamaModel(LlamaPreTrainedModel):
                 layer_outputs = self._gradient_checkpointing_func(
                     decoder_layer.__call__,
                     hidden_states,
-                    self.rot_1,
+                    rot_1,
                     attention_mask,
                     position_ids,
                     past_key_values,
@@ -1159,7 +1229,7 @@ class LlamaModel(LlamaPreTrainedModel):
             else:
                 layer_outputs = decoder_layer(
                     hidden_states,
-                    rot_1=self.rot_1,
+                    rot_1=rot_1,
                     attention_mask=attention_mask,
                     position_ids=position_ids,
                     past_key_value=past_key_values,
@@ -1176,7 +1246,7 @@ class LlamaModel(LlamaPreTrainedModel):
                 all_self_attns += (layer_outputs[1],)
 
         # Undo rotation
-        hidden_states = torch.matmul(hidden_states, self.rot_1.t())
+        hidden_states = torch.matmul(hidden_states, rot_1.t())
 
         hidden_states = self.norm(hidden_states)
 

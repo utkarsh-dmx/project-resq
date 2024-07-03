@@ -36,7 +36,7 @@ def main():
         hf_token=args.hf_token,
         eval_mode=True,
     )
-    dataset_ppl = eval_utils.evaluator(model, testloader, utils.DEV, args)
+    # dataset_ppl = eval_utils.evaluator(model, testloader, utils.DEV, args)
 
     # Rotate the weights
     if args.rotate and not args.rotate_mode == "learnable":
@@ -109,7 +109,7 @@ def main():
                 clip_ratio=layer_a_clip,
             )
     if args.rotate_mode == "learnable":
-        # do_finetuning(model, args)
+        do_finetuning(model, args)
         rotation_utils.fuse_rotation_to_weight(model, args)
 
     if args.w_bits < 16:
