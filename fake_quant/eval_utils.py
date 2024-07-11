@@ -5,7 +5,7 @@ import torch
 import os
 import logging
 from tqdm import tqdm
-from modeling_llama import create_orthogonal
+from modeling_llama import create_orthogonal, create_orthogonal_2
 
 
 @torch.no_grad()
@@ -48,7 +48,10 @@ def evaluator(model, testenc, dev, args):
         if args.rotate_mode == "learnable":
             # model.model.rot_1 = model.model.rot_1.to(dev)
             rot_1 = model.model.rot_1.to(dev)
+
+            # rot_1 = create_orthogonal_2(rot_1)
             rot_1 = create_orthogonal(rot_1)
+            rot_1 = torch.matmul(model.model.rot_1_base, rot_1)
 
     layers[0] = layers[0].to(dev)
 
@@ -199,36 +202,40 @@ def evaluator(model, testenc, dev, args):
 
 
 @torch.no_grad()
-def evaluator_v2(model, testenc, dev, args):
+def evaluator_cuda(model, testenc, dev, args):
 
     model.eval()
     # Convert the whole text of evaluation dataset into batches of sequences.
     input_ids = testenc.input_ids  # (1, text_len)
     nsamples = input_ids.numel() // model.seqlen  # The tail is truncated.
-    input_ids = (
-        input_ids[:, : nsamples * model.seqlen].view(nsamples, model.seqlen).to(dev)
+    input_ids = input_ids[:, : nsamples * model.seqlen].view(
+        nsamples, model.seqlen
     )  # (nsamples, seqlen)
 
     batch_size = args.bsz
     input_ids = [input_ids[i : i + batch_size] for i in range(0, nsamples, batch_size)]
     nbatches = len(input_ids)
 
-    model = model.cuda()
+    # model = model.cuda()
     use_cache = model.config.use_cache
     model.config.use_cache = False
     nlls = []
     loss_fct = torch.nn.CrossEntropyLoss(reduction="none")
+    with torch.no_grad():
+        for i in range(nbatches):
+            inputs = input_ids[i].to(dev)
+            hidden_states = model.model(inputs)[0]
+            lm_logits = model.lm_head(hidden_states)
+            shift_logits = lm_logits[:, :-1, :]
+            shift_labels = inputs[:, 1:]
+            loss = loss_fct(shift_logits.permute(0, 2, 1), shift_labels)
+            neg_log_likelihood = loss.float().mean(dim=1)
+            nlls.append(neg_log_likelihood)
 
-    for i in range(nbatches):
-        hidden_states = model.model(input_ids[i])[0]
-        lm_logits = model.lm_head(hidden_states)
-        shift_logits = lm_logits[:, :-1, :]
-        shift_labels = input_ids[i][:, 1:]
-        loss = loss_fct(shift_logits.permute(0, 2, 1), shift_labels)
-        neg_log_likelihood = loss.float().mean(dim=1)
-        nlls.append(neg_log_likelihood)
     nlls_tensor = torch.cat(nlls)
     ppl = torch.exp(nlls_tensor.mean())
     model.config.use_cache = use_cache
-    logging.info(f"\n{args.eval_dataset.upper()} PPL: {ppl.item():.3f}")
+    utils.cleanup_memory(verbos=False)
+
+    # logging.info(f"\n{args.eval_dataset.upper()} PPL: {ppl.item():.3f}")
     return ppl.item()

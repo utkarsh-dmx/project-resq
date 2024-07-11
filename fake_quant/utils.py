@@ -98,7 +98,7 @@ def parser_gen():
     )
     parser.add_argument("--hf_token", type=str, default=None)
     parser.add_argument(
-        "--bsz", type=int, default=32, help="Batch-size for PPL evaluation (default:32)"
+        "--bsz", type=int, default=16, help="Batch-size for PPL evaluation (default:32)"
     )
 
     # Rotation Arguments

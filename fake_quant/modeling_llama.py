@@ -43,7 +43,7 @@ if is_flash_attn_2_available():
 from transformers.models.llama.modeling_llama import *
 from hadamard_utils import random_hadamard_matrix
 from quant_utils import RotLinear
-
+from rotation_utils import random_orthogonal_matrix
 
 logger = logging.get_logger(__name__)
 
@@ -929,11 +929,21 @@ class LlamaPreTrainedModel(PreTrainedModel):
                     torch.eye(module.rot_1.data.shape[0], dtype=torch.float16)
                 )
             elif rot_init == "hadamard":
-                had = random_hadamard_matrix(
-                    module.rot_1.data.shape[0], module.rot_1.device
+                module.rot_1.data.copy_(
+                    torch.zeros(
+                        (module.rot_1.shape[0], module.rot_1.shape[1]),
+                        device=module.rot_1.device,
+                    ),
                 )
-                # module.rot_1.data.copy_(get_orthogonal_inverse(had))
-                module.rot_1.data.copy_(had)
+
+                # had = random_hadamard_matrix(
+                #     module.rot_1.data.shape[0], module.rot_1.device
+                # )
+                # rot = random_orthogonal_matrix(
+                # module.rot_1.data.shape[0], module.rot_1.device
+                # )
+                # module.rot_1.data.copy_(get_orthogonal_inverse(rot))
+                # module.rot_1.data.copy_(had)
 
                 # module.rot_1.data.copy_(
                 #     torch.randn(
@@ -1037,35 +1047,36 @@ def create_orthogonal(rot):
     return orth
 
 
-# def get_orthogonal_inverse(rot):
-#     """
-#     does exactly inverse of "create_orthogonal' function. Q = create_orthogonal(A); A = get_orthogonal_inverse(Q)
-#     """
-#     dtype = rot.dtype
-#     device = rot.device
-#     rot = rot.to(torch.float64)
-#     eye = torch.eye(rot.shape[0], device=device, dtype=torch.float64)
-#     rot = torch.linalg.solve(rot + eye, eye - rot)
-#     rot = -rot.triu(1)
-#     rot = rot.to(dtype)
-#     return rot
+def get_orthogonal_inverse(rot):
+    """
+    does exactly inverse of "create_orthogonal' function. Q = create_orthogonal(A); A = get_orthogonal_inverse(Q)
+    A = (I-Q)(I+Q)^-1
+    """
+    dtype = rot.dtype
+    device = rot.device
+    rot = rot.to(torch.float64)
+    eye = torch.eye(rot.shape[0], device=device, dtype=torch.float64)
+    rot = torch.linalg.solve(rot + eye, eye - rot, left=False)
+    rot = rot.triu(1)
+    rot = rot.to(dtype)
+    return rot
 
 
-# def create_orthogonal(rot):
-#     """
-#     helper function to convert any random matrix to orthogonal matrix. Leveraging Cayley transform
-#         1. Convert input A to a skew symmetric matrix by sk_sm = (A - A.t())
-#         2. Use cayley transform to convert skew symmetric matrix to orthogonal matrix orth = (I-A)((I+A)^-1)
-#     """
-#     dtype = rot.dtype
-#     device = rot.device
-#     rot = rot.to(torch.float64)
-#     sk_sm = rot.triu(1)
-#     sk_sm = sk_sm - sk_sm.transpose(-1, -2)
-#     eye = torch.eye(rot.shape[0], device=device, dtype=torch.float64)
-#     orth = torch.linalg.solve(eye - sk_sm, eye + sk_sm)
-#     orth = orth.to(dtype)
-#     return orth
+def create_orthogonal_2(rot):
+    """
+    helper function to convert any random matrix to orthogonal matrix. Leveraging Cayley transform
+        1. Convert input A to a skew symmetric matrix by sk_sm = (A - A.t())
+        2. Use cayley transform to convert skew symmetric matrix to orthogonal matrix orth = (I-A)((I+A)^-1)
+    """
+    dtype = rot.dtype
+    device = rot.device
+    rot = rot.to(torch.float64)
+    sk_sm = rot.triu(1)
+    sk_sm = sk_sm - sk_sm.transpose(-1, -2)
+    eye = torch.eye(rot.shape[0], device=device, dtype=torch.float64)
+    orth = torch.linalg.solve(eye + sk_sm, eye - sk_sm, left=False)
+    orth = orth.to(dtype)
+    return orth
 
 
 class LlamaModel(LlamaPreTrainedModel):
@@ -1084,6 +1095,7 @@ class LlamaModel(LlamaPreTrainedModel):
         self.embed_tokens = nn.Embedding(
             config.vocab_size, config.hidden_size, self.padding_idx
         )
+        device = self.embed_tokens.weight.device
         self.layers = nn.ModuleList(
             [
                 LlamaDecoderLayer(config, layer_idx)
@@ -1097,6 +1109,10 @@ class LlamaModel(LlamaPreTrainedModel):
         #     torch.eye(config.hidden_size, dtype=torch.float16), requires_grad=True
         # )
         self.rot_1 = nn.Parameter(torch.eye(config.hidden_size), requires_grad=True)
+        self.register_buffer(
+            "rot_1_base",
+            (random_hadamard_matrix(config.hidden_size, device)).to(self.rot_1.dtype),
+        )
 
         self.gradient_checkpointing = False
         # Initialize weights and apply final processing
@@ -1198,7 +1214,13 @@ class LlamaModel(LlamaPreTrainedModel):
         hidden_states = inputs_embeds
 
         # rotate hidden states by rot_1
-        rot_1 = create_orthogonal(self.rot_1.to(hidden_states.device))
+        # rot_1 = create_orthogonal_2(self.rot_1.to(hidden_states.device))
+        # rot_1 = create_orthogonal(self.rot_1.to(hidden_states.device))
+        rot_1 = torch.matmul(
+            self.rot_1_base.to(hidden_states.device),
+            create_orthogonal(self.rot_1.to(hidden_states.device)),
+        )
+        # rot_1 = self.rot_1.to(hidden_states.device)
         hidden_states = torch.matmul(hidden_states, rot_1)
         if self.gradient_checkpointing and self.training:
             if use_cache:

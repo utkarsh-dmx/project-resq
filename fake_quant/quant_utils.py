@@ -219,8 +219,8 @@ class ActQuantWrapper(torch.nn.Module):
         super(ActQuantWrapper, self).__init__()
         assert isinstance(module, torch.nn.Linear)
         self.module = module
-        self.weight = module.weight
-        self.bias = module.bias
+        # self.weight = module.weight
+        # self.bias = module.bias
         self.quantizer = ActQuantizer()
         self.out_quantizer = ActQuantizer()
         self.register_buffer("had_K", torch.tensor(0))
@@ -498,3 +498,55 @@ def find_qlayers(module, layers=[torch.nn.Linear, ActQuantWrapper], name=""):
             )
         )
     return res
+
+
+def set_activation_quantization_precision(model, args):
+    qlayers = find_qlayers(model, layers=[ActQuantWrapper])
+    down_proj_groupsize = -1
+    if args.a_groupsize > 0 and "llama" in args.model:
+        down_proj_groupsize = utils.llama_down_proj_groupsize(model, args.a_groupsize)
+
+    for name in qlayers:
+        layer_input_bits = args.a_bits
+        layer_groupsize = args.a_groupsize
+        layer_a_sym = not (args.a_asym)
+        layer_a_clip = args.a_clip_ratio
+
+        if "v_proj" in name and args.v_bits < 16:  # Set the v_proj precision
+            qlayers[name].out_quantizer.configure(
+                bits=args.v_bits,
+                groupsize=args.v_groupsize,
+                sym=not (args.v_asym),
+                clip_ratio=args.v_clip_ratio,
+            )
+
+        if "lm_head" in name:  # Skip lm_head quantization
+            layer_input_bits = 16
+
+        if "down_proj" in name:  # Set the down_proj precision
+            if args.int8_down_proj:
+                layer_input_bits = 8
+            layer_groupsize = down_proj_groupsize
+
+        qlayers[name].quantizer.configure(
+            bits=layer_input_bits,
+            groupsize=layer_groupsize,
+            sym=layer_a_sym,
+            clip_ratio=layer_a_clip,
+        )
+
+
+def reset_activation_quantization_precision(model, args):
+    qlayers = find_qlayers(model, layers=[ActQuantWrapper])
+    for name in qlayers:
+        layer_input_bits = 16
+        layer_groupsize = args.a_groupsize
+        layer_a_sym = not (args.a_asym)
+        layer_a_clip = args.a_clip_ratio
+
+        qlayers[name].quantizer.configure(
+            bits=layer_input_bits,
+            groupsize=layer_groupsize,
+            sym=layer_a_sym,
+            clip_ratio=layer_a_clip,
+        )
