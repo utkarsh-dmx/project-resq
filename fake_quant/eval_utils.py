@@ -51,7 +51,7 @@ def evaluator(model, testenc, dev, args):
 
             # rot_1 = create_orthogonal_2(rot_1)
             rot_1 = create_orthogonal(rot_1)
-            rot_1 = torch.matmul(model.model.rot_1_base, rot_1)
+            rot_1 = torch.matmul(model.model.rot_1_base.to(rot_1.device), rot_1)
 
     layers[0] = layers[0].to(dev)
 

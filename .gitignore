@@ -14,3 +14,4 @@ CMakeCache.txt
 Makefile
 fake_quant/wandb/
 fake_quant/finetune_logs/
+*.pth

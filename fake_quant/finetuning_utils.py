@@ -18,6 +18,8 @@ from torch.optim import AdamW, SGD
 from transformers import get_scheduler
 from tqdm import tqdm
 from eval_utils import evaluator_cuda
+import os
+import logging
 
 
 class CustomTrainer(SFTTrainer):
@@ -77,7 +79,9 @@ def set_trainable_params(model):
         else:
             p.requires_grad = False
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print("Trainable Parameters :", trainable_params)
+    logging.info(f"Trainable Parameters :{trainable_params}")
+    # print("Trainable Parameters :", trainable_params)
+    # logging.info("Trainable Parameters :", trainable_params)
     return params
 
 
@@ -176,7 +180,7 @@ def do_finetuning_v2(model, args):
         seqlen=model.seqlen,
         hf_token=args.hf_token,
         eval_mode=False,
-        nsamples=400,
+        nsamples=1200,
     )
     # model.config.use_cache = False
     use_cache = model.config.use_cache
@@ -196,13 +200,12 @@ def do_finetuning_v2(model, args):
     tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "right"
 
-    output_dir = (
-        "/home/coder/codebase/Learnable-Rotations-LLM-Quant/fake_quant/finetune_logs/"
-    )
+    output_dir = os.path.join(args.save_path, "model")
 
     accelerator = Accelerator(mixed_precision="fp16")
+    # accelerator = Accelerator()
     # optimizer = AdamW(params, lr=2e-4, weight_decay=0.0)
-    optimizer = SGD(params, lr=0.01, momentum=0.0, nesterov=False, weight_decay=0.0)
+    optimizer = SGD(params, lr=0.1, momentum=0.0, nesterov=False, weight_decay=0.0)
     model, optimizer, trainloader, testloader = accelerator.prepare(
         model, optimizer, trainloader, testloader
     )
@@ -223,4 +226,67 @@ def do_finetuning_v2(model, args):
     model.gradient_checkpointing_enable()
     completed_steps = 0
     start_time = perf_counter()
-    for epoch in range(nu
+    for epoch in range(num_train_epochs):
+        for step, batch in tqdm(
+            enumerate(trainloader, start=1), total=num_training_steps
+        ):
+            loss = model(input_ids=batch[0].cuda(), labels=batch[1].cuda()).loss
+            loss = loss / gradient_accumulation_steps
+            if step % (logging_steps * gradient_accumulation_steps) == 0:
+                # accelerator.print(
+                #     {
+                #         "samples": step,
+                #         "steps": completed_steps,
+                #         "loss/train": loss.item() * gradient_accumulation_steps,
+                #     }
+                # )
+                logging.info(
+                    f"samples:{step}, steps: {completed_steps}, loss/train: {loss.item() * gradient_accumulation_steps}"
+                )
+            accelerator.backward(loss)
+            if step % gradient_accumulation_steps == 0:
+                accelerator.clip_grad_norm_(model.parameters(), 1.0)
+                optimizer.step()
+                lr_scheduler.step()
+                optimizer.zero_grad()
+                completed_steps += 1
+            if (step % (eval_steps * gradient_accumulation_steps) == 0) or (
+                step == num_training_steps
+            ):
+                eval_ppl = evaluator_cuda(model, testloader, "cuda", args)
+                best_ppl = save_best_model(model, best_ppl, eval_ppl, output_dir)
+                # accelerator.print({"ppl/eval": eval_ppl, "ppl/eval_best": best_ppl})
+                logging.info(f"ppl/eval: {eval_ppl}, ppl/eval_best: {best_ppl}")
+                model.train()
+                accelerator.wait_for_everyone()
+                # unwrapped_model = accelerator.unwrap_model(model)
+                # unwrapped_model.save_pretrained(
+                #     output_dir, save_function=accelerator.save
+                # )
+    model.load_state_dict(torch.load(output_dir + "best_model.pth", map_location="cpu"))
+    end_time = perf_counter()
+    training_time = end_time - start_time
+    # print(f"Time taken for training: {training_time} seconds")
+    logging.info(f"Time taken for training: {training_time} seconds")
+    model.gradient_checkpointing_disable()
+    model.eval()
+    model.config.use_cache = use_cache
+    final_rot_2 = model.model.layers[0].self_attn.rot_2
+    final_rot_1 = model.model.rot_1
+    print(torch.dist(initial_rot_1.to(final_rot_1.device), final_rot_1))
+    print(torch.dist(initial_rot_2.to(final_rot_2.device), final_rot_2))
+    set_model_to_float16(model)
+
+
+def set_model_to_float16(model):
+    model.to(torch.float16)
+    for name, param in model.named_parameters():
+        if "rot" in name:
+            param.data.copy_(param.to(torch.float16))
+
+
+def save_best_model(model, best_ppl, eval_ppl, output_dir):
+    if eval_ppl < best_ppl:
+        best_ppl = eval_ppl
+        torch.save(model.state_dict(), output_dir + "best_model.pth")
+    return best_ppl
