@@ -775,10 +775,22 @@ class LlamaDecoderLayer(nn.Module):
             config.hidden_size, eps=config.rms_norm_eps
         )
 
+        self.rot_1 = nn.Parameter(torch.eye(config.hidden_size), requires_grad=True)
+        self.register_buffer(
+            "rot_1_base",
+            (random_hadamard_matrix(config.hidden_size, self.rot_1.device)).to(
+                self.rot_1.dtype
+            ),
+        )
+        self.fused = False
+        self.projection_2 = RotLinear(
+            self.hidden_size, self.hidden_size, requires_grad=False
+        )
+
     def forward(
         self,
         hidden_states: torch.Tensor,
-        rot_1: torch.Tensor,
+        # rot_1_prev: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
         past_key_value: Optional[Cache] = None,
@@ -802,13 +814,29 @@ class LlamaDecoderLayer(nn.Module):
                 (see `past_key_values`).
             past_key_value (`Tuple(torch.FloatTensor)`, *optional*): cached past key and value projection states
         """
+        # get layer rotation
+        rot_1_layer = torch.matmul(
+            self.rot_1_base.to(hidden_states.device),
+            create_orthogonal(self.rot_1.to(hidden_states.device)),
+        )
+        # rot_1_layer = create_orthogonal(self.rot_1.to(hidden_states.device))
+        # get rotation projection
+        # if rot_1_prev is not None:
+        #     rot_1_hid = torch.matmul(rot_1_prev.t(), rot_1_layer)
+        # else:
+        #     rot_1_hid = rot_1_layer
+        # rotate hidden states
+        if not self.fused:
+            hidden_states = torch.matmul(
+                hidden_states, rot_1_layer
+            )  # now hidden states are rotated to rot_1_layer space
         residual = hidden_states
 
         hidden_states = self.input_layernorm(hidden_states)
         # Self Attention
         hidden_states, self_attn_weights, present_key_value = self.self_attn(
             hidden_states=hidden_states,
-            rot_1=rot_1,
+            rot_1=rot_1_layer,
             attention_mask=attention_mask,
             position_ids=position_ids,
             past_key_value=past_key_value,
@@ -821,8 +849,11 @@ class LlamaDecoderLayer(nn.Module):
         # Fully Connected
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
-        hidden_states = self.mlp(hidden_states, rot_1)
+        hidden_states = self.mlp(hidden_states, rot_1_layer)
         hidden_states = residual + hidden_states
+
+        if not self.fused:
+            hidden_states = torch.matmul(hidden_states, rot_1_layer.t())
 
         outputs = (hidden_states,)
 
@@ -923,33 +954,45 @@ class LlamaPreTrainedModel(PreTrainedModel):
                 #     )
                 # )
 
-        elif isinstance(module, LlamaModel):
+        # elif isinstance(module, LlamaModel):
+        #     if rot_init == "identity":
+        #         module.rot_1.data.copy_(
+        #             torch.eye(module.rot_1.data.shape[0], dtype=torch.float16)
+        #         )
+        #     elif rot_init == "hadamard":
+        #         module.rot_1.data.copy_(
+        #             torch.zeros(
+        #                 (module.rot_1.shape[0], module.rot_1.shape[1]),
+        #                 device=module.rot_1.device,
+        #             ),
+        #         )
+
+        #         # had = random_hadamard_matrix(
+        #         #     module.rot_1.data.shape[0], module.rot_1.device
+        #         # )
+        #         # rot = random_orthogonal_matrix(
+        #         # module.rot_1.data.shape[0], module.rot_1.device
+        #         # )
+        #         # module.rot_1.data.copy_(get_orthogonal_inverse(rot))
+        #         # module.rot_1.data.copy_(had)
+
+        #         # module.rot_1.data.copy_(
+        #         #     torch.randn(
+        #         #         size=module.rot_1.data.shape, device=module.rot_1.device
+        #         #     )
+        #         # )
+        elif isinstance(module, LlamaDecoderLayer):
             if rot_init == "identity":
                 module.rot_1.data.copy_(
                     torch.eye(module.rot_1.data.shape[0], dtype=torch.float16)
                 )
             elif rot_init == "hadamard":
                 module.rot_1.data.copy_(
-                    torch.zeros(
+                    torch.randn(
                         (module.rot_1.shape[0], module.rot_1.shape[1]),
                         device=module.rot_1.device,
                     ),
                 )
-
-                # had = random_hadamard_matrix(
-                #     module.rot_1.data.shape[0], module.rot_1.device
-                # )
-                # rot = random_orthogonal_matrix(
-                # module.rot_1.data.shape[0], module.rot_1.device
-                # )
-                # module.rot_1.data.copy_(get_orthogonal_inverse(rot))
-                # module.rot_1.data.copy_(had)
-
-                # module.rot_1.data.copy_(
-                #     torch.randn(
-                #         size=module.rot_1.data.shape, device=module.rot_1.device
-                #     )
-                # )
 
 
 LLAMA_INPUTS_DOCSTRING = r"""
@@ -1108,11 +1151,11 @@ class LlamaModel(LlamaPreTrainedModel):
         # self.rot_1 = nn.Parameter(
         #     torch.eye(config.hidden_size, dtype=torch.float16), requires_grad=True
         # )
-        self.rot_1 = nn.Parameter(torch.eye(config.hidden_size), requires_grad=True)
-        self.register_buffer(
-            "rot_1_base",
-            (random_hadamard_matrix(config.hidden_size, device)).to(self.rot_1.dtype),
-        )
+        # self.rot_1 = nn.Parameter(torch.eye(config.hidden_size), requires_grad=True)
+        # self.register_buffer(
+        #     "rot_1_base",
+        #     (random_hadamard_matrix(config.hidden_size, device)).to(self.rot_1.dtype),
+        # )
 
         self.gradient_checkpointing = False
         # Initialize weights and apply final processing
@@ -1216,12 +1259,13 @@ class LlamaModel(LlamaPreTrainedModel):
         # rotate hidden states by rot_1
         # rot_1 = create_orthogonal_2(self.rot_1.to(hidden_states.device))
         # rot_1 = create_orthogonal(self.rot_1.to(hidden_states.device))
-        rot_1 = torch.matmul(
-            self.rot_1_base.to(hidden_states.device),
-            create_orthogonal(self.rot_1.to(hidden_states.device)),
-        )
+        # rot_1 = torch.matmul(
+        #     self.rot_1_base.to(hidden_states.device),
+        #     create_orthogonal(self.rot_1.to(hidden_states.device)),
+        # )
         # rot_1 = self.rot_1.to(hidden_states.device)
-        hidden_states = torch.matmul(hidden_states, rot_1)
+        # rot_1 = torch.eye(hidden_states.shape[-1], device=hidden_states.device)
+        # hidden_states = torch.matmul(hidden_states, rot_1)
         if self.gradient_checkpointing and self.training:
             if use_cache:
                 logger.warning_once(
@@ -1236,12 +1280,11 @@ class LlamaModel(LlamaPreTrainedModel):
         for decoder_layer in self.layers:
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
-
             if self.gradient_checkpointing and self.training:
                 layer_outputs = self._gradient_checkpointing_func(
                     decoder_layer.__call__,
                     hidden_states,
-                    rot_1,
+                    # rot_1.detach(),
                     attention_mask,
                     position_ids,
                     past_key_values,
@@ -1251,7 +1294,7 @@ class LlamaModel(LlamaPreTrainedModel):
             else:
                 layer_outputs = decoder_layer(
                     hidden_states,
-                    rot_1=rot_1,
+                    # rot_1_prev=rot_1.detach(),
                     attention_mask=attention_mask,
                     position_ids=position_ids,
                     past_key_value=past_key_values,
@@ -1268,7 +1311,7 @@ class LlamaModel(LlamaPreTrainedModel):
                 all_self_attns += (layer_outputs[1],)
 
         # Undo rotation
-        hidden_states = torch.matmul(hidden_states, rot_1.t())
+        # hidden_states = torch.matmul(hidden_states, rot_1.t())
 
         hidden_states = self.norm(hidden_states)
 

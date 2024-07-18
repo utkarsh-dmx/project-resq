@@ -15,7 +15,14 @@ def get_wikitext2(nsamples, seed, seqlen, model, hf_token, eval_mode=False):
     if eval_mode:
         testdata = datasets.load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
         testenc = tokenizer("\n\n".join(testdata["text"]), return_tensors="pt")
-        return testenc
+        input_ids = testenc.input_ids  # (1, text_len)
+        nsamples = input_ids.numel() // seqlen  # The tail is truncated.
+        input_ids = input_ids[:, : nsamples * seqlen].view(
+            nsamples, seqlen
+        )  # (nsamples, seqlen)
+
+        # input_ids = [input_ids[i : i + 1] for i in range(0, nsamples)]
+        return input_ids
     else:
         traindata = datasets.load_dataset(
             "wikitext", "wikitext-2-raw-v1", split="train"
@@ -26,9 +33,9 @@ def get_wikitext2(nsamples, seed, seqlen, model, hf_token, eval_mode=False):
         for _ in range(nsamples):
             i = random.randint(0, trainenc.input_ids.shape[1] - seqlen - 1)
             j = i + seqlen
-            inp = trainenc.input_ids[:, i:j]
+            inp = trainenc.input_ids[:, i:j][0]
             tar = inp.clone()
-            tar[:, :-1] = -100
+            tar[:-1] = -100
             trainloader.append((inp, tar))
         return trainloader
 
@@ -112,7 +119,14 @@ def get_ptb_new(nsamples, seed, seqlen, model, hf_token, eval_mode=False):
 
 
 def get_loaders(
-    name, nsamples=128, seed=0, seqlen=2048, model="", hf_token=None, eval_mode=False
+    name,
+    nsamples=128,
+    seed=0,
+    seqlen=2048,
+    model="",
+    hf_token=None,
+    eval_mode=False,
+    batch_size=1,
 ):
     if "wikitext2" in name:
         return get_wikitext2(nsamples, seed, seqlen, model, hf_token, eval_mode)

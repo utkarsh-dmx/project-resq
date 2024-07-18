@@ -222,6 +222,7 @@ def evaluator_cuda(model, testenc, dev, args):
     nlls = []
     loss_fct = torch.nn.CrossEntropyLoss(reduction="none")
     with torch.no_grad():
+        # with torch.autocast(device_type="cuda", dtype=torch.float16):
         for i in range(nbatches):
             inputs = input_ids[i].to(dev)
             hidden_states = model.model(inputs)[0]

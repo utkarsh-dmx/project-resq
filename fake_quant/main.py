@@ -25,7 +25,6 @@ def main():
         args.model, args.hf_token, args.rotate_mode == "learnable"
     )  # custom model description if using learnable rotations
     model.eval()
-
     if args.rotate_mode == "learnable":
         rotation_utils.fuse_layer_norms(model)
     # Evaluating on dataset
@@ -36,8 +35,10 @@ def main():
         seqlen=model.seqlen,
         hf_token=args.hf_token,
         eval_mode=True,
+        batch_size=args.bsz,
     )
-    # dataset_ppl = eval_utils.evaluator(model, testloader, utils.DEV, args)
+    # dataset_ppl = eval_utils.evaluator_cuda(model.cuda(), testloader, utils.DEV, args)
+    # print(dataset_ppl)
 
     # Rotate the weights
     if args.rotate and not args.rotate_mode == "learnable":

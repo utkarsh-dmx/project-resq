@@ -386,6 +386,91 @@ def add_qk_rotation_wrapper_after_function_call_in_forward(
     setattr(module, attr_name, wrapper)
 
 
+# @torch.inference_mode()
+# def fuse_rotation_to_weight(model, args):
+#     from modeling_llama import create_orthogonal
+
+#     model_type = model_utils.model_type_extractor(model)
+#     utils.cleanup_memory()
+
+#     layers = model_utils.get_transformer_layers(model, model_type=model_type)
+#     rot_1 = torch.matmul(
+#         model.model.rot_1_base.to(utils.DEV),
+#         create_orthogonal(model.model.rot_1.to(utils.DEV)),
+#     )
+#     for idx, layer in enumerate(
+#         tqdm.tqdm(layers, unit="layer", desc="Fusing Rotations to weights")
+#     ):
+#         layer = layers[idx].to(utils.DEV)
+
+#         ##### SELF ATTN ####
+#         rot_2 = layer.self_attn.rot_2
+#         num_key_value_heads = layer.self_attn.num_key_value_heads
+#         num_heads = layer.self_attn.num_heads
+#         # Q,K in self attn
+#         layer_list = [
+#             layer.self_attn.q_proj.module,
+#             layer.self_attn.k_proj.module,
+#         ]
+#         for this_layer in layer_list:
+#             w = this_layer.weight.data
+#             pre = rot_1
+#             w = w @ pre.to(w.device).to(w.dtype)
+#             this_layer.weight.data.copy_(w)
+
+#         # V in self attn
+#         this_layer = layer.self_attn.v_proj.module
+#         w = this_layer.weight.data
+#         pre = rot_1
+#         w = w @ pre.to(w.device).to(w.dtype)
+#         post = torch.kron(
+#             torch.eye(num_key_value_heads, dtype=torch.float16).to(rot_2.device),
+#             rot_2.t().contiguous(),
+#         )
+#         w = post.to(w.device).to(w.dtype) @ w
+#         this_layer.weight.data.copy_(w)
+
+#         # O in self attn
+#         this_layer = layer.self_attn.o_proj.module
+#         w = this_layer.weight.data
+#         pre = torch.kron(
+#             torch.eye(num_heads, dtype=torch.float16).to(rot_2.device),
+#             torch.inverse(rot_2.to(torch.float32)).to(torch.float16).t(),
+#         )
+#         w = w @ pre.to(w.device).to(w.dtype)
+#         post = rot_1.t()
+#         w = post.to(w.device).to(w.dtype) @ w
+#         this_layer.weight.data.copy_(w)
+
+#         #### MLP ####
+#         rot_4 = layer.mlp.rot_4
+
+#         # gate and up in mlp
+#         layer_list = [
+#             layer.mlp.gate_proj.module,
+#             layer.mlp.up_proj.module,
+#         ]
+#         for this_layer in layer_list:
+#             w = this_layer.weight.data
+#             pre = rot_1
+#             w = w @ pre.to(w.device).to(w.dtype)
+#             this_layer.weight.data.copy_(w)
+
+#         # down in mlp
+#         this_layer = layer.mlp.down_proj.module
+#         w = this_layer.weight.data
+#         pre = rot_4
+#         w = w @ pre.to(w.device).to(w.dtype)
+#         post = rot_1.t()
+#         w = post.to(w.device).to(w.dtype) @ w
+#         this_layer.weight.data.copy_(w)
+
+#         layer.self_attn.fused = True
+#         layer.mlp.fused = True
+
+#         layers[idx] = layer.cpu()
+
+
 @torch.inference_mode()
 def fuse_rotation_to_weight(model, args):
     from modeling_llama import create_orthogonal
@@ -394,10 +479,10 @@ def fuse_rotation_to_weight(model, args):
     utils.cleanup_memory()
 
     layers = model_utils.get_transformer_layers(model, model_type=model_type)
-    rot_1 = torch.matmul(
-        model.model.rot_1_base.to(utils.DEV),
-        create_orthogonal(model.model.rot_1.to(utils.DEV)),
-    )
+    # rot_1 = torch.matmul(
+    #     model.model.rot_1_base.to(utils.DEV),
+    #     create_orthogonal(model.model.rot_1.to(utils.DEV)),
+    # )
     for idx, layer in enumerate(
         tqdm.tqdm(layers, unit="layer", desc="Fusing Rotations to weights")
     ):
