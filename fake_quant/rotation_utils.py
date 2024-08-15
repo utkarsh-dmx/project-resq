@@ -249,6 +249,9 @@ def rotate_head(model, Q: torch.Tensor) -> None:
     W = model_utils.get_lm_head(
         model, model_type=model_utils.model_type_extractor(model)
     )
+    if isinstance(W, quant_utils.ActQuantWrapper):
+        W = W.module
+
     dtype = W.weight.data.dtype
     W_ = W.weight.data.to(device=utils.DEV, dtype=torch.float64)
     W.weight.data = torch.matmul(W_, Q).to(device="cpu", dtype=dtype)
@@ -476,82 +479,41 @@ def fuse_rotation_to_weight(model, args):
     from modeling_llama import create_orthogonal
 
     model_type = model_utils.model_type_extractor(model)
+    # rot_start = torch.matmul(
+    #     model.model.rot_1_base[0], create_orthogonal(model.model.rot_1[0])
+    # )
+    rot_start = model.model.rot_1
+    rotate_embeddings(model, rot_start.to(torch.float64))
+    rot_end = rot_start
+    rotate_head(model, rot_end.to(torch.float64))
+    model.model.fused.data.copy_(torch.ones(1))
     utils.cleanup_memory()
 
     layers = model_utils.get_transformer_layers(model, model_type=model_type)
-    # rot_1 = torch.matmul(
-    #     model.model.rot_1_base.to(utils.DEV),
-    #     create_orthogonal(model.model.rot_1.to(utils.DEV)),
-    # )
     for idx, layer in enumerate(
         tqdm.tqdm(layers, unit="layer", desc="Fusing Rotations to weights")
     ):
         layer = layers[idx].to(utils.DEV)
 
-        ##### SELF ATTN ####
-        rot_2 = layer.self_attn.rot_2
-        num_key_value_heads = layer.self_attn.num_key_value_heads
-        num_heads = layer.self_attn.num_heads
-        # Q,K in self attn
-        layer_list = [
-            layer.self_attn.q_proj.module,
+        module_list = [
             layer.self_attn.k_proj.module,
-        ]
-        for this_layer in layer_list:
-            w = this_layer.weight.data
-            pre = rot_1
-            w = w @ pre.to(w.device).to(w.dtype)
-            this_layer.weight.data.copy_(w)
-
-        # V in self attn
-        this_layer = layer.self_attn.v_proj.module
-        w = this_layer.weight.data
-        pre = rot_1
-        w = w @ pre.to(w.device).to(w.dtype)
-        post = torch.kron(
-            torch.eye(num_key_value_heads, dtype=torch.float16).to(rot_2.device),
-            rot_2.t().contiguous(),
-        )
-        w = post.to(w.device).to(w.dtype) @ w
-        this_layer.weight.data.copy_(w)
-
-        # O in self attn
-        this_layer = layer.self_attn.o_proj.module
-        w = this_layer.weight.data
-        pre = torch.kron(
-            torch.eye(num_heads, dtype=torch.float16).to(rot_2.device),
-            torch.inverse(rot_2.to(torch.float32)).to(torch.float16).t(),
-        )
-        w = w @ pre.to(w.device).to(w.dtype)
-        post = rot_1.t()
-        w = post.to(w.device).to(w.dtype) @ w
-        this_layer.weight.data.copy_(w)
-
-        #### MLP ####
-        rot_4 = layer.mlp.rot_4
-
-        # gate and up in mlp
-        layer_list = [
-            layer.mlp.gate_proj.module,
+            layer.self_attn.q_proj.module,
+            layer.self_attn.v_proj.module,
+            layer.self_attn.o_proj.module,
             layer.mlp.up_proj.module,
+            layer.mlp.down_proj.module,
+            layer.mlp.gate_proj.module,
+            # layer.projection_2.module,
         ]
-        for this_layer in layer_list:
-            w = this_layer.weight.data
-            pre = rot_1
-            w = w @ pre.to(w.device).to(w.dtype)
-            this_layer.weight.data.copy_(w)
 
-        # down in mlp
-        this_layer = layer.mlp.down_proj.module
-        w = this_layer.weight.data
-        pre = rot_4
-        w = w @ pre.to(w.device).to(w.dtype)
-        post = rot_1.t()
-        w = post.to(w.device).to(w.dtype) @ w
-        this_layer.weight.data.copy_(w)
+        for module in module_list:
+            module._fuse_rotations()
+        if not args.shared_rot1 == True:
+            layer.projection_2.module._fuse_rotations()
 
-        layer.self_attn.fused = True
-        layer.mlp.fused = True
+        layer.self_attn.fused.data.copy_(torch.ones(1))
+        layer.mlp.fused.data.copy_(torch.ones(1))
+        layer.fused.data.copy_(torch.ones(1))
 
         layers[idx] = layer.cpu()
 

@@ -164,9 +164,9 @@ def gptq_fwrd(model, dataloader, dev, args):
     model.model.embed_tokens = model.model.embed_tokens.to(dev)
     model.model.norm = model.model.norm.to(dev)
     layers[0] = layers[0].to(dev)
-    if args.rotate_mode == "learnable":
-        # model.model.rot_1 = model.model.rot_1.to(dev)
-        rot_1 = model.model.rot_1
+    # if args.rotate_mode == "learnable":
+    #     # model.model.rot_1 = model.model.rot_1.to(dev)
+    #     rot_1 = model.model.rot_1
 
     dtype = next(iter(model.parameters())).dtype
     inps = torch.zeros(
@@ -189,7 +189,7 @@ def gptq_fwrd(model, dataloader, dev, args):
     layers[0] = Catcher(layers[0])
     for batch in dataloader:
         try:
-            model(batch[0].to(dev))
+            model(batch[0].unsqueeze(0).to(dev))
         except ValueError:
             pass
     layers[0] = layers[0].module
@@ -257,7 +257,8 @@ def gptq_fwrd(model, dataloader, dev, args):
                         inps[j].unsqueeze(0),
                         attention_mask=attention_mask,
                         position_ids=position_ids,
-                        rot_1=rot_1,
+                        rot_1_start=None,
+                        rot_1_end=None,
                     )[0]
                 else:
                     outs[j] = layer(
@@ -286,7 +287,8 @@ def gptq_fwrd(model, dataloader, dev, args):
                     inps[j].unsqueeze(0),
                     attention_mask=attention_mask,
                     position_ids=position_ids,
-                    rot_1=rot_1,
+                    rot_1_start=None,
+                    rot_1_end=None,
                 )[0]
             else:
                 outs[j] = layer(

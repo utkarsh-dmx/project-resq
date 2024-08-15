@@ -188,15 +188,15 @@ class SGDG(Optimizer):
     def __init__(
         self,
         params,
-        lr=required,
-        momentum=0,
-        dampening=0,
-        weight_decay=0,
-        nesterov=False,
-        stiefel=False,
-        omega=0,
+        lr,
+        momentum: int = 0,
+        dampening: int = 0,
+        weight_decay: int = 0,
+        nesterov: bool = False,
+        stiefel: bool = False,
+        omega: int = 0,
         grad_clip=None,
-    ):
+    ) -> None:
         defaults = dict(
             lr=lr,
             momentum=momentum,
@@ -211,7 +211,7 @@ class SGDG(Optimizer):
             raise ValueError("Nesterov momentum requires a momentum and zero dampening")
         super(SGDG, self).__init__(params, defaults)
 
-    def __setstate__(self, state):
+    def __setstate__(self, state) -> None:
         super(SGDG, self).__setstate__(state)
         for group in self.param_groups:
             group.setdefault("nesterov", False)
@@ -234,12 +234,11 @@ class SGDG(Optimizer):
             for p in group["params"]:
                 if p.grad is None:
                     continue
-
                 unity, _ = unit(p.data.view(p.size()[0], -1))
-                weight_decay = group["weight_decay"]
-                dampening = group["dampening"]
-                nesterov = group["nesterov"]
                 if stiefel and unity.size()[0] <= unity.size()[1]:
+                    weight_decay = group["weight_decay"]
+                    dampening = group["dampening"]
+                    nesterov = group["nesterov"]
 
                     rand_num = random.randint(1, 101)
                     if rand_num == 1:
@@ -270,21 +269,27 @@ class SGDG(Optimizer):
                     p_new = Cayley_loop(unity.t(), W, V, alpha)
                     V_new = torch.mm(W, unity.t())  # n-by-p
                     #                     check_identity(p_new.t())
-
                     p.data.copy_(p_new.view(p.size()))
                     V.copy_(V_new)
 
                 else:
                     d_p = p.grad.data
-                    if weight_decay != 0:
-                        d_p.add_(weight_decay, p.data)
+                    #  defined.
+                    try:
+                        if weight_decay != 0:
+                            #  defined.
+                            d_p.add_(weight_decay, p.data)
+                    except:
+                        pass
                     if momentum != 0:
                         param_state = self.state[p]
                         if "momentum_buffer" not in param_state:
                             buf = param_state["momentum_buffer"] = d_p.clone()
                         else:
                             buf = param_state["momentum_buffer"]
+                            #  always defined.
                             buf.mul_(momentum).add_(1 - dampening, d_p)
+                        #  defined.
                         if nesterov:
                             d_p = d_p.add(momentum, buf)
                         else:

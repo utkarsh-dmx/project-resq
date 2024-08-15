@@ -98,7 +98,7 @@ def parser_gen():
     )
     parser.add_argument("--hf_token", type=str, default=None)
     parser.add_argument(
-        "--bsz", type=int, default=10, help="Batch-size for PPL evaluation (default:32)"
+        "--bsz", type=int, default=32, help="Batch-size for PPL evaluation (default:32)"
     )
 
     # Rotation Arguments
@@ -148,6 +148,12 @@ def parser_gen():
         action=argparse.BooleanOptionalAction,
         default=False,
         help="ASymmetric Activation quantization (default: False)",
+    )
+    parser.add_argument(
+        "--shared_rot1",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="If rot_1 is shared across decoder blocks",
     )
     parser.add_argument(
         "--a_clip_ratio",

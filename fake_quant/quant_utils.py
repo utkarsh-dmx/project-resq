@@ -450,6 +450,22 @@ class RotLinear(torch.nn.Linear):
         self.use_weight_quant = weight_quant
         self.use_act_quant = act_quant
 
+    def _fuse_rotations(self):
+        weight = self.weight
+        weight = (
+            torch.matmul(weight, self.pre_rotation)
+            if self.pre_rotation is not None
+            else weight
+        )
+        weight = (
+            torch.matmul(self.post_rotation, weight)
+            if self.post_rotation is not None
+            else weight
+        )
+        self.weight.data.copy_(weight)
+        self.pre_rotation = None
+        self.post_rotation = None
+
 
 def add_actquant(
     module,
@@ -522,6 +538,9 @@ def set_activation_quantization_precision(model, args):
 
         if "lm_head" in name:  # Skip lm_head quantization
             layer_input_bits = 16
+
+        # if "projection" in name:
+        #     layer_input_bits = 16
 
         if "down_proj" in name:  # Set the down_proj precision
             if args.int8_down_proj:

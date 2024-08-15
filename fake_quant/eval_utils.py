@@ -47,20 +47,21 @@ def evaluator(model, testenc, dev, args):
         model.model.embed_tokens = model.model.embed_tokens.to(dev)
         if args.rotate_mode == "learnable":
             # model.model.rot_1 = model.model.rot_1.to(dev)
-            rot_1 = model.model.rot_1.to(dev)
+            # rot_1 = model.model.rot_1.to(dev)
+            rot_1 = model.model.rot_1[-1].to(dev)
 
             # rot_1 = create_orthogonal_2(rot_1)
             rot_1 = create_orthogonal(rot_1)
-            rot_1 = torch.matmul(model.model.rot_1_base.to(rot_1.device), rot_1)
+            rot_1 = torch.matmul(model.model.rot_1_base[-1].to(rot_1.device), rot_1)
 
     layers[0] = layers[0].to(dev)
 
     # Convert the whole text of evaluation dataset into batches of sequences.
-    input_ids = testenc.input_ids  # (1, text_len)
-    nsamples = input_ids.numel() // model.seqlen  # The tail is truncated.
-    input_ids = (
-        input_ids[:, : nsamples * model.seqlen].view(nsamples, model.seqlen).to(dev)
-    )  # (nsamples, seqlen)
+    input_ids = testenc.to(dev)  # (1, text_len)
+    nsamples = input_ids.shape[0]  # The tail is truncated.
+    # input_ids = (
+    #     input_ids[:, : nsamples * model.seqlen].view(nsamples, model.seqlen).to(dev)
+    # )  # (nsamples, seqlen)
 
     batch_size = args.bsz
     input_ids = [input_ids[i : i + batch_size] for i in range(0, nsamples, batch_size)]
@@ -206,11 +207,11 @@ def evaluator_cuda(model, testenc, dev, args):
 
     model.eval()
     # Convert the whole text of evaluation dataset into batches of sequences.
-    input_ids = testenc.input_ids  # (1, text_len)
-    nsamples = input_ids.numel() // model.seqlen  # The tail is truncated.
-    input_ids = input_ids[:, : nsamples * model.seqlen].view(
-        nsamples, model.seqlen
-    )  # (nsamples, seqlen)
+    input_ids = testenc  # (1, text_len)
+    nsamples = input_ids.shape[0]  # The tail is truncated.
+    # input_ids = input_ids[:, : nsamples * model.seqlen].view(
+    # nsamples, model.seqlen
+    # )  # (nsamples, seqlen)
 
     batch_size = args.bsz
     input_ids = [input_ids[i : i + batch_size] for i in range(0, nsamples, batch_size)]
@@ -220,20 +221,25 @@ def evaluator_cuda(model, testenc, dev, args):
     use_cache = model.config.use_cache
     model.config.use_cache = False
     nlls = []
-    loss_fct = torch.nn.CrossEntropyLoss(reduction="none")
+    # loss_fct = torch.nn.CrossEntropyLoss(reduction="none")
+    loss_fct = torch.nn.CrossEntropyLoss()
     with torch.no_grad():
         # with torch.autocast(device_type="cuda", dtype=torch.float16):
-        for i in range(nbatches):
+        for i in tqdm(range(nbatches), desc="(Eval) Batches"):
             inputs = input_ids[i].to(dev)
-            hidden_states = model.model(inputs)[0]
-            lm_logits = model.lm_head(hidden_states)
+            # labels = inputs.clone()
+            # labels[:, :-1] = -100
+            # neg_log_likelihood = model(input_ids=inputs, labels=labels).loss
+            # hidden_states = model.model(inputs)[0]
+            lm_logits = model(inputs).logits
             shift_logits = lm_logits[:, :-1, :]
             shift_labels = inputs[:, 1:]
             loss = loss_fct(shift_logits.permute(0, 2, 1), shift_labels)
-            neg_log_likelihood = loss.float().mean(dim=1)
+            # neg_log_likelihood = loss.float().mean(dim=1)
+            neg_log_likelihood = loss.float()
             nlls.append(neg_log_likelihood)
 
-    nlls_tensor = torch.cat(nlls)
+    nlls_tensor = torch.stack(nlls)
     ppl = torch.exp(nlls_tensor.mean())
     model.config.use_cache = use_cache
     utils.cleanup_memory(verbos=False)

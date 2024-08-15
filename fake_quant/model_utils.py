@@ -5,6 +5,7 @@ import utils
 import os
 import logging
 import modeling_llama
+from transformers import AutoConfig
 
 OPT_MODEL = transformers.models.opt.modeling_opt.OPTForCausalLM
 OPT_LAYER = transformers.models.opt.modeling_opt.OPTDecoderLayer
@@ -44,17 +45,21 @@ def get_layers(model):
     raise NotImplementedError
 
 
-def get_llama(model_name, hf_token, learnable_rot):
+def get_llama(model_name, hf_token, learnable_rot, shared_rot1):
     # torch.nn.init.kaiming_uniform_ = skip
     # torch.nn.init.uniform_ = skip
     # torch.nn.init.normal_ = skip
     if learnable_rot:
+        config = AutoConfig.from_pretrained(model_name)
+        config.shared_rot1 = shared_rot1
         model = modeling_llama.LlamaForCausalLM.from_pretrained(
             model_name,
+            config=config,
             torch_dtype=torch.float32,
             use_auth_token=hf_token,
             # low_cpu_mem_usage=True,
         )
+        model.config.shared_rot1 = shared_rot1
     else:
         model = transformers.LlamaForCausalLM.from_pretrained(
             model_name,
@@ -83,9 +88,9 @@ def get_opt(model_name):
     return model
 
 
-def get_model(model_name, hf_token=None, learnable_rot=False):
+def get_model(model_name, hf_token=None, learnable_rot=False, shared_rot1=False):
     if "llama" in model_name:
-        return get_llama(model_name, hf_token, learnable_rot)
+        return get_llama(model_name, hf_token, learnable_rot, shared_rot1)
     elif "opt" in model_name:
         return get_opt(model_name)
     else:

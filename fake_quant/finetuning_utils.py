@@ -15,7 +15,7 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 import data_utils
 from accelerate import Accelerator, load_checkpoint_and_dispatch
 from torch.optim import AdamW, SGD
-from transformers import get_scheduler
+from transformers import get_scheduler, get_constant_schedule
 from tqdm.auto import tqdm
 from eval_utils import evaluator_cuda
 import os
@@ -23,7 +23,11 @@ import logging
 
 from torch.utils.data import DataLoader
 
-# accelerate launch  main.py --model meta-llama/Llama-2-7b-hf  --rotate --a_bits 4 --v_bits 4 --k_bits 4 --w_bits 4 --w_clip --rotate_mode learnable --seed 123 --save_name temp
+# accelerate launch  main.py --model meta-llama/Llama-2-7b-hf  --rotate --a_bits 4 --v_bits 4 --k_bits 4 --w_bits 4 --w_clip --rotate_mode learnable --seed 123 --save_name nsamples_1400_q1_ddp_better_loss
+# accelerate launch  main.py --model meta-llama/Llama-2-7b-hf  --rotate --a_bits 4 --v_bits 4 --k_bits 4 --w_bits 4 --w_clip --rotate_mode learnable --seed 123 --save_name nsamples_1400_q1_ddp_better_loss
+# accelerate launch  main.py --model meta-llama/Llama-2-7b-hf  --rotate --a_bits 4 --v_bits 4 --k_bits 4 --w_bits 4 --w_clip --rotate_mode learnable --seed 123 --save_name nsamples_1400_q1_ddp_better_loss_v2
+# python main.py --model meta-llama/Llama-2-7b-hf  --rotate --a_bits 4 --v_bits 4 --k_bits 4 --w_bits 4 --w_clip --rotate_mode learnable --seed 123 --save_name temp
+# python main.py --model meta-llama/Llama-2-7b-hf  --rotate --a_bits 4 --v_bits 4 --k_bits 4 --w_bits 4 --w_clip --rotate_mode learnable --seed 123 --save_name temp
 
 
 class CustomTrainer(SFTTrainer):
@@ -74,19 +78,23 @@ class CustomTrainer(SFTTrainer):
 
 
 def set_trainable_params(model):
-    params = []
+    params_rot1 = []
+    params_rot2 = []
     for n, p in model.named_parameters():
         # if "rot_1" in n or "rot_2" in n:
         if "rot_1" in n:
             p.requires_grad = True
-            params.append(p)
+            params_rot1.append(p)
+        elif "rot_2" in n:
+            p.requires_grad = True
+            params_rot2.append(p)
         else:
             p.requires_grad = False
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     logging.info(f"Trainable Parameters :{trainable_params}")
     # print("Trainable Parameters :", trainable_params)
     # logging.info("Trainable Parameters :", trainable_params)
-    return params
+    return params_rot1, params_rot2
 
 
 def do_finetuning(model, args):
@@ -187,67 +195,124 @@ def do_finetuning_v2(model, args):
         seqlen=model.seqlen,
         hf_token=args.hf_token,
         eval_mode=False,
-        nsamples=1400,
+        nsamples=11200,
     )
     trainloader = DataLoader(trainloader)
 
     use_cache = model.config.use_cache
     model.config.use_cache = False
     seqlen = model.seqlen
-    params = set_trainable_params(model)
+    params_rot1, params_rot2 = set_trainable_params(model)
 
     output_dir = os.path.join(args.save_path, "model")
 
     accelerator = Accelerator(mixed_precision="bf16")
     # accelerator = Accelerator()
-    optimizer = AdamW(params, lr=2e-4, weight_decay=0.0)
-    # optimizer = SGD(params, lr=0.01, momentum=0.1, nesterov=True, weight_decay=0.0)
-
+    optimizer1 = AdamW(params_rot2, lr=2e-4, weight_decay=0.0)
+    # optimizer = SGD(params, lr=0.01, momentum=0.0, nesterov=False, weight_decay=0.0)
+    optimizer2 = SGDG(params_rot1, lr=2.0, stiefel=True)
     model.train()
     model.gradient_checkpointing_enable()
     model.enable_input_require_grads()
 
-    model, optimizer, trainloader, testloader = accelerator.prepare(
-        model, optimizer, trainloader, testloader
+    model, optimizer1, trainloader, testloader = accelerator.prepare(
+        model, optimizer1, trainloader, testloader
     )
+    optimizer2 = accelerator.prepare_optimizer(optimizer2)
+    # if accelerator.is_main_process:
+    #     print(model.model.rot_1.shape)
+    #     breakpoint()
+    # accelerator.wait_for_everyone()
     if accelerator.is_main_process:
+        # breakpoint()
         print(model)
-    num_train_epochs = 0
+    num_train_epochs = 1
     num_update_steps_per_epoch = len(trainloader)
     num_training_steps = num_train_epochs * num_update_steps_per_epoch
     gradient_accumulation_steps = 16
-    logging_steps = 5
-    eval_steps = 5
+    logging_steps = 2
+    eval_steps = 2
     best_ppl = 1e10  # set to very high value.
-    lr_scheduler = get_scheduler(
-        name="linear",
-        optimizer=optimizer,
-        num_training_steps=num_training_steps,
-        num_warmup_steps=0,
-    )
+    # lr_scheduler = get_scheduler(
+    # name="linear",
+    # optimizer=optimizer,
+    # num_training_steps=num_training_steps,
+    # num_warmup_steps=0,
+    # )
+    lr_scheduler1 = get_constant_schedule(optimizer=optimizer1)
+    lr_scheduler2 = get_constant_schedule(optimizer=optimizer2)
     completed_steps = 0
     start_time = perf_counter()
     accum_loss = 0.0
+    loss_fct = torch.nn.CrossEntropyLoss()
+    accelerator.wait_for_everyone()
+
+    # do one evaluation before starting training to see where we at.
+    # model.eval()
+    nlls = []
+    with torch.no_grad():
+        for batch in tqdm(testloader, desc="Eval", leave=False):
+            input_ids = batch
+            lm_logits = model(batch).logits
+            shift_logits = lm_logits[:, :-1, :]
+            shift_labels = batch[:, 1:]
+            loss = loss_fct(shift_logits.permute(0, 2, 1), shift_labels)
+            loss = accelerator.gather(loss)
+            nlls.append(loss)
+        nlls_tensor = torch.cat(nlls)
+        eval_ppl = torch.exp(nlls_tensor.mean())
+    if eval_ppl < best_ppl:
+        if accelerator.is_main_process:
+            rot_dict = {
+                key: value
+                for key, value in model.state_dict().items()
+                if "rot_1" in key or "rot_2" in key
+            }
+            torch.save(rot_dict, output_dir)
+
+        best_ppl = eval_ppl
+
+    accelerator.wait_for_everyone()
+    # unwrap_model = accelerator.unwrap_model(model)
+    # torch.save(unwrap_model.model.rot_1, output_dir)
+    # accelerator.save_model(unwrap_model, output_dir, safe_serialization=False)
+    if accelerator.is_main_process:
+        logging.info(f"ppl/eval: {eval_ppl}, ppl/eval_best: {best_ppl}")
+    model.train()
+    accelerator.wait_for_everyone()
+
     for epoch in range(num_train_epochs):
         for step, batch in tqdm(
-            enumerate(trainloader, start=1),
-            total=num_training_steps,
+            enumerate(trainloader, start=1), total=num_training_steps, desc="Train"
         ):
-            loss = model(input_ids=batch[0], labels=batch[1]).loss
+            # loss = model(input_ids=batch[0], labels=batch[1]).loss
+            lm_logits = model(batch[0]).logits
+            shift_logits = lm_logits[:, :-1, :]
+            shift_labels = batch[0][:, 1:]
+            loss = loss_fct(shift_logits.permute(0, 2, 1), shift_labels)
             loss = loss / gradient_accumulation_steps
             accum_loss += loss
             if step % (logging_steps * gradient_accumulation_steps) == 0:
                 if accelerator.is_main_process:
                     logging.info(
-                        f"samples:{step}, steps: {completed_steps}, loss/train: {accum_loss.item()}"
+                        f"samples:{step}, steps: {completed_steps}, loss/train: {accum_loss.item()}, lr: {lr_scheduler1.get_lr()}"
                     )
+                # if accelerator.is_main_process:
+                #     print(model.model.rot_1[0:2048])  # sanity check
                 accum_loss = 0.0
             accelerator.backward(loss)
             if step % gradient_accumulation_steps == 0:
-                accelerator.clip_grad_norm_(model.parameters(), 1.0)
-                optimizer.step()
-                lr_scheduler.step()
-                optimizer.zero_grad()
+                # optimizer.step()
+                # lr_scheduler.step()
+                # optimizer.zero_grad()
+                optimizer1.step()
+                lr_scheduler1.step()
+                optimizer1.zero_grad()
+
+                optimizer2.step()
+                lr_scheduler2.step()
+                optimizer2.zero_grad()
+                # print(model.module.model.layers[0].self_attn.rot_2)
                 completed_steps += 1
             if (step % (eval_steps * gradient_accumulation_steps) == 0) or (
                 step == num_training_steps
@@ -255,41 +320,49 @@ def do_finetuning_v2(model, args):
                 model.eval()
                 nlls = []
                 with torch.no_grad():
-                    for batch in testloader:
+                    for batch in tqdm(testloader, desc="Eval", leave=False):
                         input_ids = batch
-                        labels = input_ids.clone()
-                        labels[:, :-1] = -100
-
-                        neg_log_likelihood = model(
-                            input_ids=input_ids, labels=labels
-                        ).loss
-                        neg_log_likelihood = accelerator.gather_for_metrics(
-                            neg_log_likelihood
-                        )
-                        nlls.append(neg_log_likelihood)
-
+                        lm_logits = model(batch).logits
+                        shift_logits = lm_logits[:, :-1, :]
+                        shift_labels = batch[:, 1:]
+                        loss = loss_fct(shift_logits.permute(0, 2, 1), shift_labels)
+                        loss = accelerator.gather(loss)
+                        nlls.append(loss)
                     nlls_tensor = torch.cat(nlls)
                     eval_ppl = torch.exp(nlls_tensor.mean())
                 if eval_ppl < best_ppl:
                     best_ppl = eval_ppl
-                    unwrap_model = accelerator.unwrap_model(model)
-                    accelerator.save_model(unwrap_model, output_dir)
+                    if accelerator.is_main_process:
+                        rot_dict = {
+                            key: value
+                            for key, value in model.state_dict().items()
+                            if "rot_1" in key or "rot_2" in key
+                        }
+                        torch.save(rot_dict, output_dir)
+                    # unwrap_model = accelerator.unwrap_model(model)
+                    # torch.save(unwrap_model.model.rot_1, output_dir)
+                    # unwrap_model = accelerator.unwrap_model(model)
+                    # accelerator.save_model(model, output_dir, safe_serialization=False)
                 if accelerator.is_main_process:
                     logging.info(f"ppl/eval: {eval_ppl}, ppl/eval_best: {best_ppl}")
                 model.train()
+                accelerator.wait_for_everyone()
+    # model = accelerator.unwrap_model(model)
+
+    if accelerator.is_main_process:
+        breakpoint()
     accelerator.wait_for_everyone()
-    model = accelerator.unwrap_model(model)
-    load_checkpoint_and_dispatch(model, output_dir)
+    # load_checkpoint_and_dispatch(model, output_dir)
     with torch.no_grad():
         nlls = []
         for batch in testloader:
-            input_ids = batch
-            labels = input_ids.clone()
-            labels[:, :-1] = -100
-            neg_ll = model(input_ids=input_ids, labels=labels).loss
-            neg_ll = accelerator.gather(neg_ll)
-            nlls.append(neg_ll)
-        nlls_tensor = torch.stack(nlls)
+            lm_logits = model(batch).logits
+            shift_logits = lm_logits[:, :-1, :]
+            shift_labels = batch[:, 1:]
+            loss = loss_fct(shift_logits.permute(0, 2, 1), shift_labels)
+            loss = accelerator.gather(loss)
+            nlls.append(loss)
+        nlls_tensor = torch.cat(nlls)
         eval_ppl = torch.exp(nlls_tensor.mean())
     print(eval_ppl)
     # model.load_state_dict(torch.load(, map_location="cpu"))

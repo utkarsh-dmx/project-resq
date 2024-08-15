@@ -10,6 +10,7 @@ import eval_utils
 import hadamard_utils
 from finetuning_utils import do_finetuning, do_finetuning_v2
 import logging
+from torch.utils.data import DataLoader
 
 
 def main():
@@ -19,10 +20,12 @@ def main():
 
         wandb.init(project=args.wandb_project, entity=args.wandb_id)
         wandb.config.update(args)
-
     transformers.set_seed(args.seed)
     model = model_utils.get_model(
-        args.model, args.hf_token, args.rotate_mode == "learnable"
+        args.model,
+        args.hf_token,
+        args.rotate_mode == "learnable",
+        args.shared_rot1 == True,
     )  # custom model description if using learnable rotations
     model.eval()
     if args.rotate_mode == "learnable":
@@ -37,6 +40,22 @@ def main():
         eval_mode=True,
         batch_size=args.bsz,
     )
+    # testloader = DataLoader(testloader, batch_size=args.bsz)
+    with torch.no_grad():
+        eval_ppl = eval_utils.evaluator_cuda(
+            model.cuda(), testloader.cuda(), "cuda", args
+        )
+    # model.cuda()
+    # nlls = []
+    #     for batch in testloader:
+    #         input_ids = batch.cuda()
+    #         labels = input_ids.clone()
+    #         labels[:, :-1] = -100
+    #         neg_ll = model(input_ids=input_ids, labels=labels).loss
+    #         nlls.append(neg_ll)
+    #     nlls_tensor = torch.stack(nlls)
+    #     eval_ppl = torch.exp(nlls_tensor.mean())
+    print(eval_ppl)
     # dataset_ppl = eval_utils.evaluator_cuda(model.cuda(), testloader, utils.DEV, args)
     # print(dataset_ppl)
 
@@ -79,7 +98,12 @@ def main():
 
     if args.rotate_mode == "learnable":
         # do_finetuning(model, args)
-        do_finetuning_v2(model, args)
+        # with torch.no_grad():
+        #     eval_ppl = eval_utils.evaluator_cuda(
+        #         model.cuda(), testloader.cuda(), "cuda", args
+        #     )
+        # print(eval_ppl)
+        # do_finetuning_v2(model, args)
         rotation_utils.fuse_rotation_to_weight(model, args)
     if args.w_bits < 16:
         save_dict = {}
@@ -145,8 +169,11 @@ def main():
         hf_token=args.hf_token,
         eval_mode=True,
     )
-    dataset_ppl = eval_utils.evaluator(model, testloader, utils.DEV, args)
-
+    dataset_ppl = eval_utils.evaluator_cuda(
+        model.cuda(), testloader.cuda(), utils.DEV, args
+    )
+    print(model)
+    print(dataset_ppl)
     if args.wandb:
         wandb.log({"ppl/{}".format(args.eval_dataset.upper()): dataset_ppl})
 
