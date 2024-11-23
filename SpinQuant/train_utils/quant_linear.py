@@ -21,26 +21,25 @@ class QuantizeLinear(nn.Linear):
         R4=None,
         transpose=False,
         both=False,
-        residual=False,
+        rearrange_order=None,
+        R1_2=None,
     ) -> Tensor:
         # quantize weight
         if R1 is not None:
             dtype = self.weight.dtype
             if not both:
                 if not transpose:
-                    # local_rank = get_local_rank()
-                    # if local_rank == 0:
-                    #     breakpoint()
-                    # torch.distributed.barrier()
+                    # transpose = False : R1.t() @ W.t() (rotate input activations by R1.t())
                     weight = (self.weight.to(torch.float64) @ R1.to(torch.float64)).to(
                         dtype
                     )
                 else:
+                    # transpose = True : W.t() @ R1 (rotate output activations by R1)
                     weight = (
                         R1.T.to(torch.float64) @ self.weight.to(torch.float64)
                     ).to(dtype)
             else:
-
+                # both = True : R1.t() @ W @ R1_2 (rotate input by R1.t() and output by R1_2)
                 weight = (
                     R1.T.to(torch.float64)
                     @ self.weight.to(torch.float64)
@@ -52,6 +51,7 @@ class QuantizeLinear(nn.Linear):
                 had_dim = R2.shape[0]
                 dtype = weight.dtype
                 if transpose:
+                    # transpose = True : R2^-1 @ W.t() (applied headwise)
                     W_ = weight
                     init_shape = W_.shape
                     temp = W_.reshape(-1, init_shape[-1] // had_dim, had_dim)
@@ -60,6 +60,7 @@ class QuantizeLinear(nn.Linear):
                     )
                     weight = temp.reshape(init_shape)
                 else:
+                    # transpose = False : W.t() @ R2 (applied headwise)
                     W_ = weight.t()
                     transposed_shape = W_.shape
                     temp = W_.reshape(-1, transposed_shape[-1] // had_dim, had_dim)
@@ -72,6 +73,12 @@ class QuantizeLinear(nn.Linear):
             weight = weight.to(dtype)
         else:
             weight = self.weight
+
+        if rearrange_order is not None:
+            weight = weight @ rearrange_order.to(
+                device=weight.device, dtype=weight.dtype
+            )
+
         if hasattr(self, "quantizer"):
             dtype = weight.dtype
             self.quantizer.find_params(weight.data)

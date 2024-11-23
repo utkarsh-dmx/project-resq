@@ -82,7 +82,7 @@ def stoch_round(tensor):
 
 class STEQuantize(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, x, scale, maxq, stoch):
+    def forward(ctx, x, scale, maxq, stoch=False):
         scale = scale.to(x.device)
         if stoch:
             q = torch.clamp(stoch_round(x / scale), -(maxq + 1), maxq)
@@ -98,7 +98,7 @@ class STEQuantize(torch.autograd.Function):
 
 class AsymSTEQuantize(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, x, scale, zero, maxq, stoch):
+    def forward(ctx, x, scale, zero, maxq, stoch=False):
         scale = scale.to(x.device)
         zero = zero.to(x.device)
         if stoch:
@@ -123,7 +123,14 @@ class ActQuantizer(torch.nn.Module):
         self.register_buffer("maxq", torch.tensor(0))
         self.register_buffer("scale", torch.zeros(1))
         self.register_buffer("zero", torch.zeros(1))
+        # for residuals
+        self.register_buffer("maxq_r", torch.tensor(0))
+        self.register_buffer("scale_r", torch.zeros(1))
+        self.register_buffer("zero_r", torch.zeros(1))
+
         self.bits = 16
+        self.residual_length = 0
+        self.residual_bits = 16
 
     def free(self) -> None:
         self.zero = None
@@ -131,20 +138,49 @@ class ActQuantizer(torch.nn.Module):
 
     def forward(self, x):
         x_dtype = x.dtype
+
         if self.bits == 16:
             return x
-        elif self.sym:
-            return STEQuantize.apply(x, self.scale, self.maxq, self.stoch).to(x_dtype)
-        return AsymSTEQuantize.apply(
-            x, self.scale, self.zero, self.maxq, self.stoch
-        ).to(x_dtype)
+        if self.groupsize > 0:
+            init_shape = x.shape
+            x = x.reshape(
+                x.shape[0], x.shape[1], x.shape[2] // self.groupsize, self.groupsize
+            )
+        residual_dim = x.shape[-1] - self.residual_length
+        x_lp = x[..., :residual_dim]
+        x_hp = x[..., residual_dim:]
+
+        if self.sym:
+            x = STEQuantize.apply(x_lp, self.scale, self.maxq)
+            if self.residual_length != 0:
+                x_hp = STEQuantize.apply(x_hp, self.scale_r, self.maxq_r)
+                x = torch.cat([x, x_hp], dim=-1).to(x_dtype)
+        else:
+            x = AsymSTEQuantize.apply(x_lp, self.scale, self.zero, self.maxq)
+            if self.residual_length != 0:
+                x_hp = AsymSTEQuantize.apply(
+                    x_hp, self.scale_r, self.zero_r, self.maxq_r
+                )
+                x = torch.cat([x, x_hp], dim=-1).to(x_dtype)
+
+        if self.groupsize > 0:
+            x = x.reshape(init_shape)
+
+        return x
 
     # Different from `forward`, this method returns quantized integers, scales (and zeros if asymmetric).
-    def quantize(self, x):
+    def quantize(self, x, return_residual=False):
+        residual_dim = x.shape[-1] - self.residual_length
+        x_lp = x[..., :residual_dim]
+        x_hp = x[..., residual_dim:]
         if self.sym:
-            return sym_quant(x, self.scale, self.maxq)
+            if not return_residual:
+                return sym_quant(x_lp, self.scale, self.maxq)
+            return sym_quant(x_hp, self.scale_r, self.maxq_r)
         else:
-            return asym_quant(x, self.scale, self.zero, self.maxq)
+            if not return_residual:
+                return asym_quant(x_lp, self.scale, self.zero, self.maxq)
+            return asym_quant(x_hp, self.scale_r, self.zero_r, self.maxq_r)
 
     def configure(
         self,
@@ -153,6 +189,8 @@ class ActQuantizer(torch.nn.Module):
         sym: bool = False,
         clip_ratio: float = 1.0,
         stoch: bool = False,
+        residual_length: int = 0,
+        residual_bits: int = 16,
     ) -> None:
         _, self.maxq = get_minq_maxq(bits, sym)
         self.bits = bits
@@ -160,48 +198,77 @@ class ActQuantizer(torch.nn.Module):
         self.sym = sym
         self.clip_ratio = clip_ratio
         self.stoch = stoch
+        self.residual_length = residual_length
+        self.residual_bits = residual_bits
+        _, self.maxq_r = get_minq_maxq(residual_bits, sym)
+
         assert (
             self.clip_ratio <= 1 and self.clip_ratio > 0
         ), "Clip ratio should be in (0, 1]"
 
-    def find_params_per_token_groupwise(self, x) -> None:
-        init_shape = x.shape
-        reshaped_x = x.reshape(
-            -1, x.shape[-2], x.shape[-1] // self.groupsize, self.groupsize
-        )
-
-        xmax = torch.amax(reshaped_x, dim=3, keepdim=True) * self.clip_ratio
-        xmin = torch.amin(reshaped_x, dim=3, keepdim=True) * self.clip_ratio
+    def find_params_per_token_groupwise(self, x, residual=False):
+        # init_shape = x.shape
+        # reshaped_x = x.reshape(
+        #     -1, x.shape[-2], x.shape[-1] // self.groupsize, self.groupsize
+        # )
+        maxq = self.maxq if not residual else self.maxq_r
+        # xmax = torch.amax(reshaped_x, dim=3, keepdim=True) * self.clip_ratio
+        # xmin = torch.amin(reshaped_x, dim=3, keepdim=True) * self.clip_ratio
+        xmax = torch.amax(x, dim=3, keepdim=True) * self.clip_ratio
+        xmin = torch.amin(x, dim=3, keepdim=True) * self.clip_ratio
         if self.sym:
             xmax = torch.maximum(torch.abs(xmin), xmax)
             tmp = xmax == 0
-            self.scale = xmax / self.maxq
-            self.scale[tmp] = 1
-            self.zero = torch.zeros_like(self.scale)
+            scale = xmax / maxq
+            scale[tmp] = 1
+            zero = torch.zeros_like(scale)
         else:
             tmp = (xmin == 0) & (xmax == 0)
             xmin[tmp] = -1
             xmax[tmp] = +1
-            self.scale = (xmax - xmin) / self.maxq
-            self.zero = torch.round(-xmin / self.scale)
+            scale = (xmax - xmin) / maxq
+            zero = torch.round(-xmin / scale)
 
-        self.scale = self.scale.repeat(1, 1, 1, self.groupsize).reshape(init_shape)
-        self.zero = self.zero.repeat(1, 1, 1, self.groupsize).reshape(init_shape)
+        # scale = scale.repeat(1, 1, 1, self.groupsize).reshape(init_shape)
+        # zero = zero.repeat(1, 1, 1, self.groupsize).reshape(init_shape)
 
-    def find_params(self, x) -> None:
+        return scale, zero
+
+    def find_params(self, x, residual_dim=-1) -> None:
+        if self.groupsize > 0:
+            # per group mixed precision quantization
+            init_shape = x.shape
+            x_reshaped = x.reshape(
+                x.shape[0], x.shape[1], x.shape[2] // self.groupsize, self.groupsize
+            )
+            residual_dim = x_reshaped.shape[-1] - self.residual_length
+            x_lp = x_reshaped[..., :residual_dim]
+            x_hp = x_reshaped[..., residual_dim:]
+            self.scale, self.zero = self.find_params_per_token_groupwise(x_lp, False)
+            if self.residual_length != 0:
+                self.scale_r, self.zero_r = self.find_params_per_token_groupwise(
+                    x_hp, True
+                )
+
+            return
+        residual_dim = x.shape[-1] - self.residual_length
+        x_lp = x[..., :residual_dim]
+        x_hp = x[..., residual_dim:]
+
+        self.scale, self.zero = self._find_params(x_lp, False)
+        if self.residual_length != 0:
+            self.scale_r, self.zero_r = self._find_params(x_hp, True)
+
+        return
+
+    def _find_params(self, x, residual=False):
         if self.bits == 16:
             return
 
         dev = x.device
-        self.maxq = self.maxq.to(dev)
+        maxq = self.maxq_r if residual else self.maxq
 
         init_shape = x.shape
-
-        if self.groupsize > 0:
-            # group-wise per-token quantization
-            self.find_params_per_token_groupwise(x)
-            # utils.cleanup_memory(verbos=False)
-            return
 
         reshaped_x = x.reshape((-1, x.shape[-1]))
 
@@ -211,27 +278,25 @@ class ActQuantizer(torch.nn.Module):
         if self.sym:
             xmax = torch.maximum(torch.abs(xmin), xmax)
             tmp = xmax == 0
-            self.scale = (xmax / self.maxq).unsqueeze(1).repeat(1, reshaped_x.shape[-1])
-            self.scale[tmp] = 1
-            self.scale = self.scale.reshape(init_shape)
-            self.zero = torch.zeros_like(self.scale)
+            scale = (xmax / maxq).unsqueeze(1).repeat(1, reshaped_x.shape[-1])
+            scale[tmp] = 1
+            scale = scale.reshape(init_shape)
+            zero = torch.zeros_like(scale)
+
         else:
             tmp = (xmin == 0) & (xmax == 0)
             xmin[tmp] = -1
             xmax[tmp] = +1
-            self.scale = (xmax - xmin) / self.maxq
-            self.zero = torch.round(-xmin / self.scale)
+            scale = (xmax - xmin) / maxq
+            zero = torch.round(-xmin / scale)
 
-            self.scale = (
-                self.scale.unsqueeze(1)
-                .repeat(1, reshaped_x.shape[-1])
-                .reshape(init_shape)
+            scale = (
+                scale.unsqueeze(1).repeat(1, reshaped_x.shape[-1]).reshape(init_shape)
             )
-            self.zero = (
-                self.zero.unsqueeze(1)
-                .repeat(1, reshaped_x.shape[-1])
-                .reshape(init_shape)
-            )
+
+            zero = zero.unsqueeze(1).repeat(1, reshaped_x.shape[-1]).reshape(init_shape)
+
+        return scale, zero
 
 
 class ActQuantWrapper(torch.nn.Module):
@@ -250,6 +315,7 @@ class ActQuantWrapper(torch.nn.Module):
         self.weight = module.weight
         self.bias = module.bias
         self.quantizer = ActQuantizer()
+        self.hadK_quantizer = ActQuantizer()
         self.out_quantizer = ActQuantizer()
         self.register_buffer("had_K", torch.tensor(0))
         self._buffers["had_K"] = None
@@ -258,6 +324,8 @@ class ActQuantWrapper(torch.nn.Module):
         self.online_partial_had = False
         self.had_dim = 0
         self.fp32_had = False
+        self.residual = 0
+        self.no_had = False
 
     def extra_repr(self) -> str:
         str_ = f"Input Quantizer Bits: {self.quantizer.bits}"
@@ -279,17 +347,57 @@ class ActQuantWrapper(torch.nn.Module):
         return str_
 
     def forward(
-        self, x, R1=None, R2=None, R4=None, transpose=False, both=False, residual=False
+        self,
+        x,
+        R1=None,
+        R2=None,
+        R4=None,
+        transpose=False,
+        both=False,
+        rearrange_order=None,
+        R1_2=None,
+        column_order=None,
     ):
         x_dtype = x.dtype
         # Rotate, if needed
         if self.online_full_had:
             if self.fp32_had:  # Full Hadamard in FP32
-                x = hadamard_utils.matmul_hadU_cuda(x.float(), self.had_K, self.K).to(
-                    x_dtype
-                )
+                if self.no_had:
+                    shape = x.shape
+                    n = shape[-1]
+                    K = self.K
+                    x_ = x
+                    if self.hadK_quantizer.bits < 16:
+                        self.hadK_quantizer.find_params(x_)
+                        x_ = self.hadK_quantizer(x_).to(x_dtype)
+                    x_ = x_.view(-1, n // K, K)
+                    x = torch.matmul(x_.float(), self.had_K).reshape(shape).to(x_dtype)
+                    if column_order is not None:
+                        x = x[..., column_order]
+
+                else:
+                    x = hadamard_utils.matmul_hadU_cuda(
+                        x.float(), self.had_K, self.K
+                    ).to(x_dtype)
             else:  # Full Hadamard in FP16
-                x = hadamard_utils.matmul_hadU_cuda(x, self.had_K, self.K)
+                if self.no_had:
+                    shape = x.shape
+                    n = shape[-1]
+                    K = self.K
+                    x_ = x
+                    if self.hadK_quantizer.bits < 16:
+                        self.hadK_quantizer.find_params(x_)
+                        x_ = self.hadK_quantizer(x_).to(x_dtype)
+                    x_ = x_.view(-1, n // K, K)
+                    x = (
+                        torch.matmul(x_, self.had_K.to(x_dtype))
+                        .reshape(shape)
+                        .to(x_dtype)
+                    )
+                    if column_order is not None:
+                        x = x[..., column_order]
+                else:
+                    x = hadamard_utils.matmul_hadU_cuda(x, self.had_K, self.K)
 
         elif self.online_partial_had:
             # todo: implement this in QAttention to avoid reshaping!
@@ -318,17 +426,21 @@ class ActQuantWrapper(torch.nn.Module):
             x = x.reshape(init_shape)
 
         if self.quantizer.bits < 16:  # Quantize, if needed
-            if not residual:
-                self.quantizer.find_params(x)
-                x = self.quantizer(x).to(x_dtype)
-                self.quantizer.free()
-            else:
-                self.quantizer.find_params(x[..., 128:])
-                x_quant = self.quantizer(x[..., 128:]).to(x_dtype)
-                x = torch.cat((x[..., :128], x_quant), dim=-1)
-                self.quantizer.free()
+            self.quantizer.find_params(x)
+            x = self.quantizer(x).to(x_dtype)
+            self.quantizer.free()
+
         if R1 is not None:
-            x = self.module(x, R1, R2, R4, transpose, both, residual).to(x_dtype)
+            x = self.module(
+                x,
+                R1,
+                R2,
+                R4,
+                transpose,
+                both,
+                rearrange_order,
+                R1_2,
+            ).to(x_dtype)
         else:
             x = self.module(x).to(x_dtype)
 

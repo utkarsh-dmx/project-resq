@@ -12,7 +12,7 @@ import transformers
 
 from train_utils import apply_r3_r4, rtn_utils
 from utils import fuse_norm_utils, hadamard_utils, quant_utils, utils
-from eval_utils.rotation_utils import fuse_basis_to_model
+from eval_utils.rotation_utils import fuse_basis_to_model, rearrange_columns
 
 
 def prepare_model(args, model):
@@ -22,6 +22,8 @@ def prepare_model(args, model):
     # Rotate the weights
     fuse_norm_utils.fuse_layer_norms(model)
     fuse_basis_to_model(model, args)
+
+    rearrange_columns(model, args, True)
 
     utils.cleanup_memory(verbos=True)
 
@@ -56,19 +58,28 @@ def prepare_model(args, model):
             num_heads = model.config.num_attention_heads
             model_dim = model.config.hidden_size
             head_dim = model_dim // num_heads
+            residual_fraction = args.residual_fraction
+            residual_length = int(residual_fraction * model_dim)
 
             if "v_proj" in name and args.v_bits < 16:  # Set the v_proj precision
                 v_groupsize = head_dim
+                # per group residual
+                v_residual_length = int(v_groupsize * residual_fraction)
                 qlayers[name].out_quantizer.configure(
                     bits=args.v_bits,
                     groupsize=v_groupsize,
                     sym=not (args.v_asym),
                     clip_ratio=args.v_clip_ratio,
+                    residual_length=v_residual_length,
+                    residual_bits=8,
                 )
+
             if "basis_change" in name:
-                layer_input_bits = 16
+                layer_input_bits = 8
             if "o_proj" in name:
                 layer_groupsize = head_dim
+                # per group residual
+                residual_length = int(v_groupsize * residual_fraction)
 
             if "lm_head" in name:  # Skip lm_head quantization
                 layer_input_bits = 16
@@ -78,11 +89,14 @@ def prepare_model(args, model):
                     layer_input_bits = 8
                 layer_groupsize = down_proj_groupsize
 
+            # qlayers[name].residual = args.residual_length
             qlayers[name].quantizer.configure(
                 bits=layer_input_bits,
                 groupsize=layer_groupsize,
                 sym=layer_a_sym,
                 clip_ratio=layer_a_clip,
+                residual_length=residual_length,
+                residual_bits=8,
             )
 
     if args.k_bits < 16:

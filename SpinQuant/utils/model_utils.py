@@ -18,10 +18,12 @@ def skip(*args, **kwargs):
 
 
 def get_layer_io_save_path(args):
-    return os.path.join(args.save_path, "layer_io", f"{args.layer_idx:03d}.pt")
+    return os.path.join(
+        args.output_dir, "layer_io", args.rotate_mode, f"{args.layer_idx:03d}.pt"
+    )
 
 
-def capture_layer_io(layer, layer_input):
+def capture_layer_io(layer, layer_input, attn_mask, pos_ids, pos_emb):
     def hook_factory(module_name, captured_vals, is_input):
         def hook(module, input, output):
             if is_input:
@@ -57,11 +59,16 @@ def capture_layer_io(layer, layer_input):
         )
 
     # Process each sequence in the batch one by one to avoid OOM.
-    for seq_idx in range(layer_input.shape[0]):
+    for seq_idx in range(len(layer_input)):
         # Extract the current sequence across all dimensions.
-        seq = layer_input[seq_idx : seq_idx + 1].to("cuda")
+        seq = layer_input[seq_idx : seq_idx + 1][0].to("cuda")
         # Perform a forward pass for the current sequence.
-        layer(seq)
+        layer(
+            seq,
+            attention_mask=attn_mask,
+            position_ids=pos_ids,
+            position_embeddings=pos_emb,
+        )
 
     # After processing all sequences, concatenate the accumulated inputs for each sub-layer across the batch.
     for module_name in captured_inputs:

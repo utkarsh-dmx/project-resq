@@ -26,6 +26,7 @@ def evaluator(model, testenc, dev, args):
 
     layers = model.model.layers
     model.model.embed_tokens = model.model.embed_tokens.to(dev)
+    model.model.rotary_emb = model.model.rotary_emb.to(dev)
 
     layers[0] = layers[0].to(dev)
 
@@ -60,6 +61,8 @@ def evaluator(model, testenc, dev, args):
             cache["i"] += 1
             cache["attention_mask"] = kwargs["attention_mask"]
             cache["position_ids"] = kwargs["position_ids"]
+            cache["position_embeddings"] = kwargs["position_embeddings"]
+
             raise ValueError
 
     layers[0] = Catcher(layers[0])
@@ -74,33 +77,35 @@ def evaluator(model, testenc, dev, args):
     layers[0] = layers[0].cpu()
 
     model.model.embed_tokens = model.model.embed_tokens.cpu()
+    model.model.rotary_emb = model.model.rotary_emb.cpu()
     position_ids = cache["position_ids"]
 
     torch.cuda.empty_cache()
     outs = [0] * nbatches
     attention_mask = cache["attention_mask"]
+    position_embeddings = cache["position_embeddings"]
 
     for i in tqdm(range(len(layers)), desc="(Eval) Layers"):
         layer = layers[i].to(dev)
 
         # Dump the layer input and output
         if args.capture_layer_io and args.layer_idx == i:
-            captured_io = model_utils.capture_layer_io(layer, inps)
+            captured_io = model_utils.capture_layer_io(
+                layer, inps, attention_mask, position_ids, position_embeddings
+            )
             save_path = model_utils.get_layer_io_save_path(args)
             os.makedirs(os.path.dirname(save_path), exist_ok=True)
             torch.save(captured_io, save_path)
             logging.info(f"Dumped layer input and output to: {save_path}")
-        total_kurtoses = 0
         for j in range(nbatches):
             outputs = layer(
                 inps[j],
                 attention_mask=attention_mask,
                 #  defined.
                 position_ids=position_ids,
+                position_embeddings=position_embeddings,
             )
             outs[j] = outputs[0]
-            total_kurtoses += outputs[-1]
-        print(total_kurtoses / nbatches)
         layers[i] = layer.cpu()
         del layer
         torch.cuda.empty_cache()
@@ -162,7 +167,7 @@ def evaluator_cuda(model, testenc, dev, args):
             # neg_log_likelihood = loss.float().mean(dim=1)
             neg_log_likelihood = loss.float()
             nlls.append(neg_log_likelihood)
-
+            # break
     nlls_tensor = torch.stack(nlls)
     ppl = torch.exp(nlls_tensor.mean())
     model.config.use_cache = use_cache

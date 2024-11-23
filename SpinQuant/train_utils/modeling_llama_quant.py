@@ -237,9 +237,12 @@ class LlamaMLP(nn.Module):
             self.intermediate_size, self.hidden_size, bias=config.mlp_bias
         )
         self.act_fn = ACT2FN[config.hidden_act]
-        self.R4 = None
+        # self.R4 = None
+        self.R4_1 = None
+        self.R4_2 = None
+        self.new_column_order = None
 
-    def forward(self, x, R1):
+    def forward(self, x, R1_in, R1_out):
         # if self.config.pretraining_tp > 1:
         #     slice = self.intermediate_size // self.config.pretraining_tp
         #     gate_proj_slices = self.gate_proj.weight.split(slice, dim=0)
@@ -257,50 +260,26 @@ class LlamaMLP(nn.Module):
         #     ]
         #     down_proj = sum(down_proj)
         # else:
-        # incoherence = 0.5 * (x.amax(dim=-1) / torch.norm(x, "fro", dim=-1)).mean()
-        # kurtoses = 0.5 * cal_kurtoses(x, dim=-1)
         dtype = x.dtype
-        x = self.act_fn(self.gate_proj(x, R1, residual=True)) * self.up_proj(
-            x, R1, residual=True
-        )
-        R4 = None
-        if self.R4 is not None:
-            x = hadamard_utils.matmul_hadU_cuda(
-                x.float(), self.R4.weight, self.R4.weight.shape[0]
-            ).to(dtype)
-            R4 = self.R4.weight
+        x = self.act_fn(self.gate_proj(x, R1_in)) * self.up_proj(x, R1_in)
+        R4 = self.R4_2.weight if self.R4_2 is not None else None
+        if self.R4_1 is not None:
+            R4 = torch.block_diag(
+                self.R4_1.weight.to(torch.float64), self.R4_2.weight.to(torch.float64)
+            )
+
+        if self.new_column_order is not None:
+            x = x @ self.new_column_order.to(device=x.device, dtype=x.dtype)
 
         # kurtoses += 0.5 * cal_kurtoses(x, dim=-1)
         down_proj = self.down_proj(
             x,
-            R1,
+            R1_out,
             transpose=True,
             R4=R4,
         )
 
-        # kurtoses = (
-        #     cal_kurtoses(
-        #         self.down_proj.get_rotated_weight(
-        #             R1, transpose=True, R4=self.R4.weight
-        #         ),
-        #         dim=(0, 1),
-        #     )
-        #     + cal_kurtoses(self.up_proj.get_rotated_weight(R1), dim=(0, 1))
-        #     + cal_kurtoses(self.gate_proj.get_rotated_weight(R1), dim=(0, 1))
-        # ) / 3
-
-        # inf_norm = (
-        #     torch.norm(
-        #         self.down_proj.get_rotated_weight(
-        #             R1, transpose=True, R4=self.R4.weight
-        #         ),
-        #         float("inf"),
-        #     )
-        #     + torch.norm(self.up_proj.get_rotated_weight(R1), float("inf"))
-        #     + torch.norm(self.gate_proj.get_rotated_weight(R1), float("inf"))
-        # )
-
-        return down_proj, 0.0
+        return down_proj
 
 
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
@@ -363,7 +342,10 @@ class LlamaAttention(nn.Module):
         self.o_proj = QuantizeLinear(
             self.hidden_size, self.hidden_size, bias=config.attention_bias
         )
-        self.R2 = None
+        # self.R2 = None
+        self.R2_1 = None
+        self.R2_2 = None
+        self.new_column_order = None
         self._init_rope()
 
     def _init_rope(self):
@@ -765,7 +747,8 @@ class LlamaSdpaAttention(LlamaAttention):
         output_attentions: bool = False,
         use_cache: bool = False,
         cache_position: Optional[torch.LongTensor] = None,
-        R1=None,
+        R1_in=None,
+        R1_out=None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         if output_attentions:
             # TODO: Improve this warning with e.g. `model.config.attn_implementation = "manual"` once this is implemented.
@@ -784,46 +767,18 @@ class LlamaSdpaAttention(LlamaAttention):
             )
 
         bsz, q_len, _ = hidden_states.size()
-        # incoherence = 0.5 * (
-        #     (
-        #         hidden_states.amax(dim=-1) / torch.norm(hidden_states, "fro", dim=-1)
-        #     ).mean()
-        # )
-        # kurtoses = 0.5 * cal_kurtoses(hidden_states, dim=-1)
-        # kurtoses = (
-        #     cal_kurtoses(self.q_proj.get_rotated_weight(R1), dim=(0, 1))
-        #     + cal_kurtoses(self.k_proj.get_rotated_weight(R1), dim=(0, 1))
-        #     + cal_kurtoses(
-        #         self.v_proj.get_rotated_weight(R1, R2=self.R2.weight), dim=(0, 1)
-        #     )
-        #     + cal_kurtoses(
-        #         self.o_proj.get_rotated_weight(R1, R2=self.R2.weight, transpose=True),
-        #         dim=(0, 1),
-        #     )
-        # ) / 4
-        # inf_norm = (
-        #     torch.norm(self.q_proj.get_rotated_weight(R1), float("inf"))
-        #     + torch.norm(self.k_proj.get_rotated_weight(R1), float("inf"))
-        #     + torch.norm(
-        #         self.v_proj.get_rotated_weight(R1, R2=self.R2.weight), float("inf")
-        #     )
-        #     + torch.norm(
-        #         self.o_proj.get_rotated_weight(R1, R2=self.R2.weight, transpose=True),
-        #         float("inf"),
-        #     )
-        # )
-        # local_rank = get_local_rank()
-        # if local_rank == 0 and self.layer_idx == 17:
-        #     breakpoint()
-        # torch.distributed.barrier()
 
-        query_states = self.q_proj(hidden_states, R1, residual=True)
-        key_states = self.k_proj(hidden_states, R1, residual=True)
+        R2 = self.R2_2
+        if self.R2_1 is not None:
+            R2 = torch.block_diag(
+                self.R2_1.weight.to(torch.float64), self.R2_2.weight.to(torch.float64)
+            )
+        query_states = self.q_proj(hidden_states, R1_in)
+        key_states = self.k_proj(hidden_states, R1_in)
         value_states = self.v_proj(
             hidden_states,
-            R1,
-            R2=self.R2.weight if self.R2 is not None else None,
-            residual=True,
+            R1_in,
+            R2=R2,
         )
 
         query_states = query_states.view(
@@ -877,17 +832,19 @@ class LlamaSdpaAttention(LlamaAttention):
 
         attn_output = attn_output.transpose(1, 2).contiguous()
         attn_output = attn_output.view(bsz, q_len, self.hidden_size)
-        # incoherence += (
-        #     0.5
-        #     * (attn_output.amax(dim=-1) / torch.norm(attn_output, "fro", dim=-1)).mean()
-        # )
-        # kurtoses += 0.5 * cal_kurtoses(attn_output, dim=-1)
+
+        # attn_output_rearranged = attn_output
+        if self.new_column_order is not None:
+            attn_output = attn_output @ self.new_column_order.to(
+                device=attn_output.device, dtype=attn_output.dtype
+            )
 
         attn_output = self.o_proj(
             attn_output,
-            R1,
-            R2=self.R2.weight if self.R2 is not None else None,
+            R1_out,
+            R2=R2,
             transpose=True,
+            rearrange_order=self.new_column_order,
         )
 
         return attn_output, None, past_key_value, 0.0
@@ -921,6 +878,10 @@ class LlamaDecoderLayer(nn.Module):
             self.hidden_size, self.hidden_size, bias=False
         )
         # self.rot_change.weight.data.copy_(torch.eye(self.hidden_size))
+        self.R1_attn_1 = None
+        self.R1_attn_2 = None
+        self.R1_mlp_1 = None
+        self.R1_mlp_2 = None
 
     def forward(
         self,
@@ -931,7 +892,7 @@ class LlamaDecoderLayer(nn.Module):
         output_attentions: Optional[bool] = False,
         use_cache: Optional[bool] = False,
         cache_position: Optional[torch.LongTensor] = None,
-        R1=None,
+        R1_prev=None,
     ) -> Tuple[
         torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]
     ]:
@@ -950,7 +911,23 @@ class LlamaDecoderLayer(nn.Module):
             past_key_value (`Tuple(torch.FloatTensor)`, *optional*): cached past key and value projection states
         """
         # residual = hidden_states
-        residual = self.basis_change_1(hidden_states, R1, both=True, residual=True)
+        # residual = self.basis_change_1(hidden_states, R1, both=True, residual=True)
+
+        if self.R1_attn_1 is not None:
+            # if R1_1 is not None then R1_2 will also be not None
+            R1_attn = torch.block_diag(
+                self.R1_attn_1.weight.to(torch.float64),
+                self.R1_attn_2.weight.to(torch.float64),
+            )
+        else:
+            if self.R1_attn_2 is not None:
+                R1_attn = self.R1_attn_2.weight.to(torch.float64)
+            else:
+                R1_attn = None
+
+        residual = self.basis_change_1(
+            hidden_states, R1=R1_prev, R1_2=R1_attn, both=True
+        )
 
         hidden_states = self.input_layernorm(hidden_states)
 
@@ -964,18 +941,31 @@ class LlamaDecoderLayer(nn.Module):
                 output_attentions=output_attentions,
                 use_cache=use_cache,
                 cache_position=cache_position,
-                R1=R1,
+                R1_in=R1_prev,
+                R1_out=R1_attn,
             )
         )
         hidden_states = residual + hidden_states
         # Fully Connected
         # residual = hidden_states
-        residual = self.basis_change_2(hidden_states, R1, both=True, residual=True)
-        hidden_states = self.post_attention_layernorm(hidden_states)
-        hidden_states, inf_norm_mlp = self.mlp(
-            hidden_states,
-            R1=R1,
+        # residual = self.basis_change_2(hidden_states, R1, both=True, residual=True)
+        if self.R1_mlp_1 is not None:
+            # if R1_1 is not None then R1_2 will also be not None
+            R1_mlp = torch.block_diag(
+                self.R1_mlp_1.weight.to(torch.float64),
+                self.R1_mlp_2.weight.to(torch.float64),
+            )
+        else:
+            if self.R1_mlp_2 is not None:
+                R1_mlp = self.R1_mlp_2.weight.to(torch.float64)
+            else:
+                R1_mlp = None
+        residual = self.basis_change_2(
+            hidden_states, R1=R1_attn, R1_2=R1_mlp, both=True
         )
+
+        hidden_states = self.post_attention_layernorm(hidden_states)
+        hidden_states = self.mlp(hidden_states, R1_in=R1_attn, R1_out=R1_mlp)
         hidden_states = residual + hidden_states
 
         outputs = (hidden_states,)
@@ -986,9 +976,7 @@ class LlamaDecoderLayer(nn.Module):
         if use_cache:
             outputs += (present_key_value,)
 
-        # kurtoses_layer = 0.5 * kurtoses_attn + 0.5 * kurtoses_mlp
-        outputs += (inf_norm_mlp + inf_norm_attn,)
-        return outputs
+        return outputs, R1_mlp
 
 
 LLAMA_START_DOCSTRING = r"""
@@ -1137,7 +1125,8 @@ class LlamaModel(LlamaPreTrainedModel):
         )
         self.norm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.gradient_checkpointing = False
-
+        self.R1_1 = None
+        self.R1_2 = None
         # Initialize weights and apply final processing
         self.post_init()
 
@@ -1160,7 +1149,7 @@ class LlamaModel(LlamaPreTrainedModel):
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
-        R1=None,
+        # R1=None,
     ) -> Union[Tuple, BaseModelOutputWithPast]:
         output_attentions = (
             output_attentions
@@ -1190,6 +1179,17 @@ class LlamaModel(LlamaPreTrainedModel):
 
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
+
+        if self.R1_1 is not None:
+            # if R1_1 is not None then R1_2 will also be not None
+            R1 = torch.block_diag(
+                self.R1_1.weight.to(torch.float64), self.R1_2.weight.to(torch.float64)
+            )
+        else:
+            if self.R1_2 is not None:
+                R1 = self.R1_2.weight.to(torch.float64)
+            else:
+                R1 = None
         if R1 is not None:
             dtype = inputs_embeds.dtype
             inputs_embeds = (inputs_embeds.to(torch.float64) @ R1.to(torch.float64)).to(
@@ -1230,14 +1230,13 @@ class LlamaModel(LlamaPreTrainedModel):
         all_hidden_states = () if output_hidden_states else None
         all_self_attns = () if output_attentions else None
         next_decoder_cache = None
-        # total_kurtoses = 0
-        total_norm = 0
+        R1_prev = R1
         for idx, decoder_layer in enumerate(self.layers):
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
 
             if self.gradient_checkpointing and self.training:
-                layer_outputs = self._gradient_checkpointing_func(
+                layer_outputs, R1_prev = self._gradient_checkpointing_func(
                     decoder_layer.__call__,
                     hidden_states,
                     causal_mask,
@@ -1246,10 +1245,10 @@ class LlamaModel(LlamaPreTrainedModel):
                     output_attentions,
                     use_cache,
                     cache_position,
-                    R1,
+                    R1_prev,
                 )
             else:
-                layer_outputs = decoder_layer(
+                layer_outputs, R1_prev = decoder_layer(
                     hidden_states,
                     attention_mask=causal_mask,
                     position_ids=position_ids,
@@ -1257,10 +1256,8 @@ class LlamaModel(LlamaPreTrainedModel):
                     output_attentions=output_attentions,
                     use_cache=use_cache,
                     cache_position=cache_position,
-                    R1=R1,
+                    R1_prev=R1_prev,
                 )
-            # total_kurtoses += layer_outputs[-1]
-            total_norm += layer_outputs[-1]
 
             hidden_states = layer_outputs[0]
 
@@ -1293,7 +1290,7 @@ class LlamaModel(LlamaPreTrainedModel):
                 hidden_states=all_hidden_states,
                 attentions=all_self_attns,
             ),
-            total_norm / len(self.layers),
+            R1_prev,
         )
 
     def _update_causal_mask(
@@ -1426,8 +1423,8 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
         self.vocab_size = config.vocab_size
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
         # self.R1 = None
-        self.R1_1 = None
-        self.R1_2 = None
+        # self.R1_1 = None
+        # self.R1_2 = None
         # Initialize weights and apply final processing
         self.post_init()
 
@@ -1505,18 +1502,18 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
         return_dict = (
             return_dict if return_dict is not None else self.config.use_return_dict
         )
-        if self.R1_1 is not None:
-            R1 = torch.block_diag(
-                self.R1_1.weight.to(torch.float64), self.R1_2.weight.to(torch.float64)
-            )
-        else:
-            if self.R1_2 is not None:
-                R1 = self.R1_2.weight.to(torch.float64)
-            else:
-                R1 = None
+        # if self.R1_1 is not None:
+        #     R1 = torch.block_diag(
+        #         self.R1_1.weight.to(torch.float64), self.R1_2.weight.to(torch.float64)
+        #     )
+        # else:
+        #     if self.R1_2 is not None:
+        #         R1 = self.R1_2.weight.to(torch.float64)
+        #     else:
+        #         R1 = None
 
         # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
-        outputs, model_inf_norm = self.model(
+        outputs, R1_prev = self.model(
             input_ids=input_ids,
             attention_mask=attention_mask,
             position_ids=position_ids,
@@ -1527,13 +1524,13 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
             cache_position=cache_position,
-            R1=R1,
+            # R1=R1,
         )
 
         hidden_states = outputs[0]
-        if R1 is not None:
+        if R1_prev is not None:
             dtype = hidden_states.dtype
-            hidden_states = (hidden_states.to(torch.float64) @ R1.T).to(dtype)
+            hidden_states = (hidden_states.to(torch.float64) @ R1_prev.T).to(dtype)
 
         if self.config.pretraining_tp > 1:
             lm_head_slices = self.lm_head.weight.split(

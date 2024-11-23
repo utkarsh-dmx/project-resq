@@ -14,6 +14,7 @@ from typing import Optional, Tuple
 import argparse
 import transformers
 
+
 @dataclass
 class ModelArguments:
     input_model: Optional[str] = field(
@@ -23,6 +24,10 @@ class ModelArguments:
         default="test-output", metadata={"help": "Output rotation checkpoint path"}
     )
     optimized_rotation_path: Optional[str] = field(
+        default=None, metadata={"help": "Optimized rotation checkpoint path"}
+    )
+
+    optimized_basis_path: Optional[str] = field(
         default=None, metadata={"help": "Optimized rotation checkpoint path"}
     )
 
@@ -56,7 +61,10 @@ def parser_gen():
                         if we want to quantize the Keys""",
     )
     parser.add_argument(
-        "--rotate_mode", type=str, default="hadamard", choices=["hadamard", "random"]
+        "--rotate_mode",
+        type=str,
+        default=None,
+        choices=["resq", "quarot", "spinquant", "quik", "none"],
     )
     parser.add_argument(
         "--rotation_seed",
@@ -206,6 +214,20 @@ def parser_gen():
         help="Clip ratio for k-cache quantization. new_max = max * clip_ratio",
     )
 
+    parser.add_argument(
+        "--residual_fraction",
+        type=float,
+        default=0,
+        help="Fraction of channels to keep in floating point.",
+    )
+
+    parser.add_argument(
+        "--down_proj_blocksize",
+        type=int,
+        default=1024,
+        help="Block size for mixing down proj layer channels",
+    )
+
     # Save/Load Quantized Model Arguments
     parser.add_argument(
         "--load_qmodel_path",
@@ -220,12 +242,26 @@ def parser_gen():
         help="Save the quantized model to the specified path!",
     )
 
+    parser.add_argument("--tasks", default="")
+    parser.add_argument("--num_fewshot", type=int, default=0)
+    parser.add_argument("--limit", type=int, default=-1)
+
+    parser.add_argument("--quarot", action="store_true")
+    parser.add_argument("--spinquant", action="store_true")
+    parser.add_argument("--rotation_granularity", default="per_layer")
+
     # Experiments Arguments
     parser.add_argument(
         "--capture_layer_io",
         action=argparse.BooleanOptionalAction,
         default=False,
         help="Capture the input and output of the specified decoder layer and dump into a file",
+    )
+    parser.add_argument(
+        "--layerwise_mse",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="calculates layerwise mean squared error of quantized input and full precision input",
     )
     parser.add_argument(
         "--layer_idx", type=int, default=10, help="Which decoder layer to capture"
@@ -246,16 +282,19 @@ def process_args_ptq():
 
     ptq_args, unknown_args = parser_gen()
 
-    parser = transformers.HfArgumentParser(
-        (ModelArguments, TrainingArguments)
-    )
-    model_args, training_args = parser.parse_args_into_dataclasses(
-        args=unknown_args
-    )
+    parser = transformers.HfArgumentParser((ModelArguments, TrainingArguments))
+    model_args, training_args = parser.parse_args_into_dataclasses(args=unknown_args)
     if model_args.optimized_rotation_path is not None:
         ptq_args.optimized_rotation_path = model_args.optimized_rotation_path
     else:
         ptq_args.optimized_rotation_path = None
+
+    if model_args.optimized_basis_path is not None:
+        ptq_args.optimized_basis_path = model_args.optimized_basis_path
+    else:
+        ptq_args.optimized_basis_path = None
+
     ptq_args.bsz = training_args.per_device_eval_batch_size
+    ptq_args.output_dir = training_args.output_dir
 
     return model_args, training_args, ptq_args

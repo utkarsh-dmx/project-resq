@@ -171,7 +171,7 @@ def matmul_hadUt_cuda(X, hadK, K):
     return matmul_hadU_cuda(X, hadK, K, transpose=True)
 
 
-def apply_exact_had_to_linear(module, had_dim=-1, output=False, R2=None):
+def apply_exact_had_to_linear(module, had_dim=-1, output=False, R2=None, per_head=False):
     assert isinstance(module, torch.nn.Linear)
     in_features, out_features = module.in_features, module.out_features
 
@@ -199,12 +199,26 @@ def apply_exact_had_to_linear(module, had_dim=-1, output=False, R2=None):
             W_ = W_.t()
             transposed_shape = W_.shape
             temp = W_.reshape(-1, transposed_shape[-1] // had_dim, had_dim)
-            temp = temp.to(torch.float64) @ hadK
+            if per_head :
+                num_heads = transposed_shape[-1] // had_dim
+                for i in range(num_heads):
+                    temp[:,i,:] = temp[:,i,:].to(torch.float64) @ hadK[i]
+            else:
+                temp = temp.to(torch.float64) @ hadK
             W_ = temp.reshape(transposed_shape).t()
         else:
             init_shape = W_.shape
             temp = W_.reshape(-1, init_shape[-1] // had_dim, had_dim)
-            temp = temp.to(torch.float64) @ torch.inverse(hadK).t()
+            if per_head :
+                # will come here to merge U_value to o_proj. Need to take care of 
+                num_kv_heads = hadK.shape[0] 
+                num_kv_groups = init_shape[0] // (had_dim * num_kv_heads)
+                for i in range(num_kv_heads):
+                    for j in range(num_kv_groups):
+                        idx = j + num_kv_groups * i
+                        temp[:,idx,:] = temp[:,idx,:].to(torch.float64) @ torch.inverse(hadK[i]).t()
+            else:
+                temp = temp.to(torch.float64) @ torch.inverse(hadK).t()
             W_ = temp.reshape(init_shape)
     module.weight.data = W_.to(device=dev, dtype=dtype)
 

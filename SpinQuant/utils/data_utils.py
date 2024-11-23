@@ -16,7 +16,9 @@ import torch
 import transformers
 
 
-def get_wikitext2(nsamples=128, seed=0, seqlen=2048, model="", tokenizer=None, eval_mode=False):
+def get_wikitext2(
+    nsamples=128, seed=0, seqlen=2048, model="", tokenizer=None, eval_mode=False
+):
     if tokenizer is None:
         tokenizer = transformers.AutoTokenizer.from_pretrained(model, use_fast=False)
 
