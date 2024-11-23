@@ -17,4 +17,3 @@ fake_quant/wandb/
 fake_quant/finetune_logs/
 *.pth
 *.safetensors
-lm_eval/
