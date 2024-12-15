@@ -358,11 +358,13 @@ def fuse_basis_shared(model, args):
     config = model.config
     num_heads = config.num_attention_heads
     model_dim = config.hidden_size
+    residual_length = int(args.residual_fraction * model_dim)
+    assert (
+        R1_2.shape[0] == residual_length
+    )  # checking if rotation dimensions align with residual length
     head_dim = model_dim // num_heads
-    dev = model.model.embed_tokens.weight.device
     U_cpk = torch.load(args.optimized_basis_path)
     U_attn = torch.matmul(U_cpk["attn_mlp"].cuda(), R1)
-
     torch.distributed.barrier()
     rotate_embeddings(model, U_attn)
     rotate_head(model, U_attn)
@@ -418,7 +420,6 @@ def fuse_basis_per_layer(model, args):
         R1 = torch.eye(hidden_dim).cuda().to(torch.float64)
         R2 = torch.eye(head_dim).cuda().to(torch.float64)
     U_attn = torch.matmul(U_cpk["layer.0.self_attn"].cuda(), R1)
-
     rotate_embeddings(model, U_attn)
     rotate_head(model, R1)
     utils.cleanup_memory()
@@ -534,21 +535,12 @@ class QKRotationWrapper(torch.nn.Module):
         else:
             self.pre_rotation_quantizer.find_params(q)
             q = self.pre_rotation_quantizer(q).to(dtype)
-            q = torch.einsum(
-                "n i m k, i k j -> n i m j",
-                q,
-                torch.repeat_interleave(
-                    self.k_rotation.to(q), dim=0, repeats=self.num_kv_groups
-                ),
-            )
+            q = torch.matmul(q, self.k_rotation.to(q))
             self.pre_rotation_quantizer.free()
+
             self.pre_rotation_quantizer.find_params(k)
             k = self.pre_rotation_quantizer(k).to(dtype)
-            k = torch.einsum(
-                "n i m k, i k j -> n i m j",
-                k,
-                self.k_rotation.to(k),
-            )
+            k = torch.matmul(k, self.k_rotation.to(k))
 
         (bsz, num_heads, seq_len, head_dim) = k.shape
 

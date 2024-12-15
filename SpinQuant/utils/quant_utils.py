@@ -135,6 +135,8 @@ class ActQuantizer(torch.nn.Module):
     def free(self) -> None:
         self.zero = None
         self.scale = None
+        self.zero_r = None
+        self.scale_r = None
 
     def forward(self, x):
         x_dtype = x.dtype
@@ -258,7 +260,6 @@ class ActQuantizer(torch.nn.Module):
         self.scale, self.zero = self._find_params(x_lp, False)
         if self.residual_length != 0:
             self.scale_r, self.zero_r = self._find_params(x_hp, True)
-
         return
 
     def _find_params(self, x, residual=False):
@@ -328,7 +329,7 @@ class ActQuantWrapper(torch.nn.Module):
         self.no_had = False
 
     def extra_repr(self) -> str:
-        str_ = f"Input Quantizer Bits: {self.quantizer.bits}"
+        str_ = f"Input Quantizer Bits: {self.quantizer.bits}, Residual Length: {self.quantizer.residual_length}"
         if self.quantizer.bits < 16:
             str_ += (
                 f" (Asymmetric Per-Token)"
@@ -336,7 +337,7 @@ class ActQuantWrapper(torch.nn.Module):
                 else f" (Symmetric Per-Token)"
             )
 
-        str_ += f"\nOutput Quantizer Bits: {self.out_quantizer.bits}"
+        str_ += f"\nOutput Quantizer Bits: {self.out_quantizer.bits}, Residual Length: {self.out_quantizer.residual_length}"
         if self.out_quantizer.bits < 16:
             str_ += (
                 f" (Asymmetric Per-Token)"
@@ -430,6 +431,9 @@ class ActQuantWrapper(torch.nn.Module):
             x = self.quantizer(x).to(x_dtype)
             self.quantizer.free()
 
+        if column_order is not None:
+            x = x[..., column_order]
+
         if R1 is not None:
             x = self.module(
                 x,
@@ -438,7 +442,6 @@ class ActQuantWrapper(torch.nn.Module):
                 R4,
                 transpose,
                 both,
-                rearrange_order,
                 R1_2,
             ).to(x_dtype)
         else:

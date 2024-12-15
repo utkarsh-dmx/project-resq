@@ -242,12 +242,18 @@ def parser_gen():
         help="Save the quantized model to the specified path!",
     )
 
+    parser.add_argument(
+        "--calib_dataset",
+        type=str,
+        default="wikitext",
+        help="Dataset to use for calibration",
+    )
     parser.add_argument("--tasks", default="")
+    parser.add_argument("--long_bench_tasks", default="")
     parser.add_argument("--num_fewshot", type=int, default=0)
     parser.add_argument("--limit", type=int, default=-1)
 
-    parser.add_argument("--quarot", action="store_true")
-    parser.add_argument("--spinquant", action="store_true")
+    parser.add_argument("--flash_attn", action="store_true")
     parser.add_argument("--rotation_granularity", default="per_layer")
 
     # Experiments Arguments
@@ -267,6 +273,12 @@ def parser_gen():
         "--layer_idx", type=int, default=10, help="Which decoder layer to capture"
     )
 
+    parser.add_argument(
+        "--multigpu",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Enable model parallelism using this flag. Map decoder blocks to different GPUs",
+    )
     args, unknown = parser.parse_known_args()
 
     assert (

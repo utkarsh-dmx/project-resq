@@ -19,7 +19,7 @@ from transformers import (
     Trainer,
     default_data_collator,
 )
-from utils.data_utils import get_wikitext2
+from utils.data_utils import get_data
 from train_utils.fsdp_trainer import FSDPTrainer
 from train_utils.main import prepare_model
 from transformers.models.llama.modeling_llama import repeat_kv, apply_rotary_pos_emb
@@ -30,8 +30,9 @@ from utils import utils, data_utils, fuse_norm_utils, quant_utils
 from tqdm import tqdm
 import transformers
 from utils.hadamard_utils import random_orthogonal_matrix
+import time
 
-log: Logger = get_logger("spinquant")
+log: Logger = get_logger("resq", "get_basis.log")
 
 
 @torch.no_grad()
@@ -65,13 +66,15 @@ def get_outlier_rotations(model_args, training_args, ptq_args) -> None:
     log.info("Complete tokenizer loading...")
     model.config.use_cache = False
     seqlen = model.seqlen
-    train_data = data_utils.get_wikitext2(
+    train_data = data_utils.get_data(
         seed=ptq_args.seed,
         seqlen=seqlen,
         tokenizer=tokenizer,
         eval_mode=False,
-        nsamples=512,
+        nsamples=ptq_args.nsamples,
+        calib_dataset=ptq_args.calib_dataset,
     )
+
     nbatches = len(train_data)
     layers = model.model.layers
     model.model.embed_tokens = model.model.embed_tokens.to(utils.DEV)
@@ -272,7 +275,7 @@ def get_outlier_rotations(model_args, training_args, ptq_args) -> None:
     os.makedirs(model_args.output_rotation_path, exist_ok=True)
     path = os.path.join(
         model_args.output_rotation_path,
-        "U-" + "outliers" + model_args.input_model.split("/")[1] + ".bin",
+        "U-" + "outliers-" + model_args.input_model.split("/")[1] + ".bin",
     )
 
     torch.save(
@@ -289,7 +292,6 @@ def get_basis(model_args, training_args, ptq_args) -> None:
         torch_dtype=torch.float32,
     )
     model.seqlen = training_args.model_max_length
-
     transformers.set_seed(ptq_args.seed)
     model.eval()
 
@@ -312,12 +314,13 @@ def get_basis(model_args, training_args, ptq_args) -> None:
     log.info("Complete tokenizer loading...")
     model.config.use_cache = False
     seqlen = model.seqlen
-    train_data = data_utils.get_wikitext2(
+    train_data = data_utils.get_data(
         seed=ptq_args.seed,
         seqlen=seqlen,
         tokenizer=tokenizer,
         eval_mode=False,
-        nsamples=512,
+        nsamples=ptq_args.nsamples,
+        calib_dataset=ptq_args.calib_dataset,
     )
     nbatches = len(train_data)
     layers = model.model.layers
@@ -424,267 +427,288 @@ def get_basis(model_args, training_args, ptq_args) -> None:
     )
     rotation_dict["R2_2"] = random_orthogonal_matrix(residual_length_head, "cuda")
 
-    for i in tqdm(range(nlayers), desc="(Collecting Cov matrices) Layers"):
-        layer = layers[i].to(utils.DEV)
+    os.makedirs(model_args.output_rotation_path, exist_ok=True)
+    rotation_path = os.path.join(
+        model_args.output_rotation_path,
+        "R-"
+        + str(residual_fraction)
+        + "-"
+        + model_args.input_model.split("/")[1]
+        + ".bin",
+    )
+    if not os.path.exists(rotation_path):
+        torch.save(
+            rotation_dict,
+            rotation_path,
+        )
+    basis_path = os.path.join(
+        model_args.output_rotation_path,
+        "U-"
+        + str(ptq_args.calib_dataset)
+        + "-"
+        + str(ptq_args.nsamples)
+        + "-"
+        + model_args.input_model.split("/")[1]
+        + ".bin",
+    )
+    if not os.path.exists(basis_path):
+        os.makedirs(model_args.output_rotation_path, exist_ok=True)
+        for i in tqdm(range(nlayers), desc="(Collecting Cov matrices) Layers"):
+            layer = layers[i].to(utils.DEV)
 
-        hooks = []
+            hooks = []
 
-        def hook_fn_upproj(module, input, output):
-            global input_up_proj
-            input_up_proj = input[0]
+            def hook_fn_upproj(module, input, output):
+                global input_up_proj
+                input_up_proj = input[0]
 
-        def hook_fn_vproj(module, input, output):
-            global output_vproj
-            output_vproj = output
+            def hook_fn_vproj(module, input, output):
+                global output_vproj
+                output_vproj = output
 
-        def hook_fn_kproj(module, input, output):
-            global output_kproj
-            output_kproj = output
+            def hook_fn_kproj(module, input, output):
+                global output_kproj
+                output_kproj = output
 
-        def hook_fn_qproj(module, input, output):
-            global output_qproj, input_qkv_proj
-            output_qproj = output
-            input_qkv_proj = input[0]
+            def hook_fn_qproj(module, input, output):
+                global output_qproj, input_qkv_proj
+                output_qproj = output
+                input_qkv_proj = input[0]
 
-        def hook_fn_downproj(module, input, output):
-            global input_down_proj
-            input_down_proj = input[0]
+            def hook_fn_downproj(module, input, output):
+                global input_down_proj
+                input_down_proj = input[0]
 
-        hooks.append(layer.mlp.up_proj.register_forward_hook(hook_fn_upproj))
-        hooks.append(layer.mlp.down_proj.register_forward_hook(hook_fn_downproj))
-        hooks.append(layer.self_attn.v_proj.register_forward_hook(hook_fn_vproj))
-        hooks.append(layer.self_attn.k_proj.register_forward_hook(hook_fn_kproj))
-        hooks.append(layer.self_attn.q_proj.register_forward_hook(hook_fn_qproj))
+            hooks.append(layer.mlp.up_proj.register_forward_hook(hook_fn_upproj))
+            hooks.append(layer.mlp.down_proj.register_forward_hook(hook_fn_downproj))
+            hooks.append(layer.self_attn.v_proj.register_forward_hook(hook_fn_vproj))
+            hooks.append(layer.self_attn.k_proj.register_forward_hook(hook_fn_kproj))
+            hooks.append(layer.self_attn.q_proj.register_forward_hook(hook_fn_qproj))
 
-        for j in range(nbatches):
-            with torch.no_grad():
-                # register forward hook for getting inputs to MLP
+            for j in range(nbatches):
+                with torch.no_grad():
+                    # register forward hook for getting inputs to MLP
 
-                # 1 sample at a time
-                outs[j] = layer(
-                    inps[j],
-                    attention_mask=attention_mask,
-                    position_ids=position_ids,
-                    position_embeddings=position_embeddings,
-                )[0]
+                    # 1 sample at a time
+                    outs[j] = layer(
+                        inps[j],
+                        attention_mask=attention_mask,
+                        position_ids=position_ids,
+                        position_embeddings=position_embeddings,
+                    )[0]
 
-                # reshape to get value states per head
-                value_states = output_vproj.view(
-                    1,
-                    seqlen,
-                    layer.self_attn.num_key_value_heads,
-                    layer.self_attn.head_dim,
-                ).transpose(1, 2)
+                    # reshape to get value states per head
+                    value_states = output_vproj.view(
+                        1,
+                        seqlen,
+                        layer.self_attn.num_key_value_heads,
+                        layer.self_attn.head_dim,
+                    ).transpose(1, 2)
 
-                # rope cos, sin
-                cos, sin = layer.self_attn.rotary_emb(value_states, position_ids)
+                    # rope cos, sin
+                    cos, sin = layer.self_attn.rotary_emb(value_states, position_ids)
 
-                # reshape to get key states per head
-                key_states = output_kproj.view(
-                    1,
-                    seqlen,
-                    layer.self_attn.num_key_value_heads,
-                    layer.self_attn.head_dim,
-                ).transpose(1, 2)
-                # key_states = repeat_kv(key_states, layer.self_attn.num_key_value_groups)
+                    # reshape to get key states per head
+                    key_states = output_kproj.view(
+                        1,
+                        seqlen,
+                        layer.self_attn.num_key_value_heads,
+                        layer.self_attn.head_dim,
+                    ).transpose(1, 2)
+                    # key_states = repeat_kv(key_states, layer.self_attn.num_key_value_groups)
 
-                # reshape to get query states per head
-                query_states = output_qproj.view(
-                    1,
-                    seqlen,
-                    layer.self_attn.num_heads,
-                    layer.self_attn.head_dim,
-                ).transpose(1, 2)
+                    # reshape to get query states per head
+                    query_states = output_qproj.view(
+                        1,
+                        seqlen,
+                        layer.self_attn.num_heads,
+                        layer.self_attn.head_dim,
+                    ).transpose(1, 2)
 
-                # apply rotary embedding
-                query_states_pos, key_states_pos = apply_rotary_pos_emb(
-                    query_states, key_states, cos, sin
+                    # apply rotary embedding
+                    query_states_pos, key_states_pos = apply_rotary_pos_emb(
+                        query_states, key_states, cos, sin
+                    )
+
+                    # calculate covariance
+                    H_mlp[i] += torch.sum(
+                        input_up_proj.double().mT @ input_up_proj.double(), dim=0
+                    )  # shape : [hidden_dim, hidden_dim]
+
+                    H_attn[i] += torch.sum(
+                        input_qkv_proj.double().mT @ input_qkv_proj.double(), dim=0
+                    )  # shape : [hidden_dim, hidden_dim]
+                    H_value[i] += torch.sum(
+                        value_states.double().mT @ value_states.double(), dim=0
+                    )  # shape : [num_heads, head_dim, head_dim]
+
+                    H_key_pos[i] += torch.sum(
+                        key_states_pos.double().mT @ key_states_pos.double(), dim=(0)
+                    )  # shape : [num_kv_heads, head_dim, head_dim]
+
+                    H_down_proj[i] += torch.sum(
+                        input_down_proj.view(
+                            input_down_proj.shape[0], -1, ptq_args.down_proj_blocksize
+                        )
+                        .double()
+                        .mT
+                        @ input_down_proj.view(
+                            input_down_proj.shape[0], -1, ptq_args.down_proj_blocksize
+                        ).double(),
+                        dim=(0),
+                    )  # shape : [1024, 1024]
+            for hook in hooks:
+                hook.remove()
+
+            layers[i] = layers[i].cpu()
+
+            torch.cuda.empty_cache()
+
+            inps, outs = outs, inps
+
+        if "per_layer" in rotation_granularity.lower():
+            for i in tqdm(range(nlayers), desc="(Getting Basis) Layers"):
+
+                # eigen decomposition of attn
+                eval_attn, evec_attn = perform_eigen_decomp(H_attn[i] / nbatches)
+
+                # eigen decomposition of up proj
+                eval_mlp, evec_mlp = perform_eigen_decomp(H_mlp[i] / nbatches)
+
+                # eigen decomposition of down proj
+                eval_down_proj, evec_down_proj = perform_eigen_decomp(
+                    H_down_proj[i] / nbatches
                 )
 
-                # calculate covariance
-                H_mlp[i] += torch.sum(
-                    input_up_proj.double().mT @ input_up_proj.double(), dim=0
-                )  # shape : [hidden_dim, hidden_dim]
+                # eigen decomposition of value states
+                eval_value, evec_value = perform_eigen_decomp(
+                    H_value[i] / nbatches, per_head=True, num_heads=H_value.shape[0]
+                )
 
-                H_attn[i] += torch.sum(
-                    input_qkv_proj.double().mT @ input_qkv_proj.double(), dim=0
-                )  # shape : [hidden_dim, hidden_dim]
-                H_value[i] += torch.sum(
-                    value_states.double().mT @ value_states.double(), dim=0
-                )  # shape : [num_heads, head_dim, head_dim]
+                # eigen decomposition of key states after rope embedding
+                eval_k_pos, evec_k_pos = perform_eigen_decomp(
+                    H_key_pos[i] / nbatches, per_head=True, num_heads=H_key_pos.shape[0]
+                )
 
-                H_key_pos[i] += torch.sum(
-                    key_states_pos.double().mT @ key_states_pos.double(), dim=(0)
-                )  # shape : [num_kv_heads, head_dim, head_dim]
+                print(
+                    "up proj:",
+                    (eval_mlp[0:100].sum() / eval_mlp.sum()).item(),
+                    "down proj:",
+                    (eval_down_proj[0:100].sum() / eval_down_proj.sum()).item(),
+                    ", hidden_attn:",
+                    (eval_attn[0:100].sum() / eval_attn.sum()).item(),
+                    ", v_proj:",
+                    (eval_value[:, :32].sum(1) / eval_value.sum(1)).mean().item(),
+                    # ", kq_proj:",
+                    # (eval_kq[:, :32].sum(1) / eval_kq.sum(1)).mean().item(),
+                    ", k_proj_pos:",
+                    (eval_k_pos[:, :32].sum(1) / eval_k_pos.sum(1)).mean().item(),
+                )
 
-                H_down_proj[i] += torch.sum(
-                    input_down_proj.view(
-                        input_down_proj.shape[0], -1, ptq_args.down_proj_blocksize
-                    )
-                    .double()
-                    .mT
-                    @ input_down_proj.view(
-                        input_down_proj.shape[0], -1, ptq_args.down_proj_blocksize
-                    ).double(),
-                    dim=(0),
-                )  # shape : [1024, 1024]
-        for hook in hooks:
-            hook.remove()
+                basis_dict["config"] = "per_layer_rotation"
+                basis_dict["layer." + str(i) + ".mlp"] = evec_mlp.cpu()
+                basis_dict["layer." + str(i) + ".mlp.down_proj"] = evec_down_proj.cpu()
+                basis_dict["layer." + str(i) + ".self_attn"] = evec_attn.cpu()
+                basis_dict["layer." + str(i) + ".self_attn.value"] = evec_value.cpu()
+                basis_dict["layer." + str(i) + ".self_attn.key_pos"] = evec_k_pos.cpu()
 
-        layers[i] = layers[i].cpu()
+        elif "full_shared" in rotation_granularity.lower():
+            # eigen decomposition of attn and mlp
+            eval_attn_mlp, evec_attn_mlp = perform_eigen_decomp(
+                (H_attn.sum(0) + H_mlp.sum(0)) / (2 * nbatches * nlayers)
+            )
+
+            basis_dict["config"] = "full_shared_rotation"
+            basis_dict["attn_mlp"] = evec_attn_mlp.cpu()
+
+            for i in tqdm(range(nlayers), desc="(Getting Rotations) Layers"):
+                # eigen decomposition of down proj
+                eval_down_proj, evec_down_proj = perform_eigen_decomp(
+                    H_down_proj[i] / nbatches
+                )
+                # eigen decomposition of value states
+                eval_value, evec_value = perform_eigen_decomp(
+                    H_value[i] / nbatches, per_head=True, num_heads=kv_heads
+                )
+                # eigen decomposition of key states after rope embedding
+                eval_k_pos, evec_k_pos = perform_eigen_decomp(
+                    H_key_pos[i].sum(0) / (kv_heads * nbatches),
+                )
+
+                basis_dict["layer." + str(i) + ".self_attn.value"] = evec_value.cpu()
+                basis_dict["layer." + str(i) + ".self_attn.key_pos"] = evec_k_pos.cpu()
+                basis_dict["layer." + str(i) + ".mlp.down_proj"] = evec_down_proj.cpu()
+
+                print(
+                    "down proj:",
+                    (
+                        eval_down_proj[-residual_length_down_proj:].sum()
+                        / eval_down_proj.sum()
+                    ).item(),
+                    ", hidden_attn_mlp:",
+                    (
+                        eval_attn_mlp[-residual_length_hidden:].sum()
+                        / eval_attn_mlp.sum()
+                    ).item(),
+                    ", v_proj:",
+                    (eval_value[:, -residual_length_head:].sum(1) / eval_value.sum(1))
+                    .mean()
+                    .item(),
+                    ", k_proj_pos:",
+                    (eval_k_pos[-residual_length_head:].sum() / eval_k_pos.sum())
+                    .mean()
+                    .item(),
+                )
+
+        elif "one_per_decoder" in rotation_granularity.lower():
+
+            for i in tqdm(range(nlayers), desc="(Getting Basis) Layers"):
+                # eigen decomposition of attn and mlp
+                eval_attn_mlp, evec_attn_mlp = perform_eigen_decomp(
+                    (H_attn[i] + H_mlp[i]) / (2 * nbatches)
+                )
+                # eigen decomposition of down proj
+                eval_down_proj, evec_down_proj = perform_eigen_decomp(
+                    H_down_proj[i] / nbatches
+                )
+
+                # eigen decomposition of value states
+                eval_value, evec_value = perform_eigen_decomp(
+                    H_value[i] / nbatches, per_head=True, num_heads=kv_heads
+                )
+
+                # eigen decomposition of key states after rope embedding
+                eval_k_pos, evec_k_pos = perform_eigen_decomp(
+                    H_key_pos[i] / nbatches, per_head=True, num_heads=kv_heads
+                )
+
+                print(
+                    "down proj:",
+                    (eval_down_proj[0:100].sum() / eval_down_proj.sum()).item(),
+                    ", attn_mlp:",
+                    (eval_attn_mlp[0:100].sum() / eval_attn_mlp.sum()).item(),
+                    ", v_proj:",
+                    (eval_value[:, :32].sum(1) / eval_value.sum(1)).mean().item(),
+                    # ", kq_proj:",
+                    # (eval_kq[:, :32].sum(1) / eval_kq.sum(1)).mean().item(),
+                    ", k_proj_pos:",
+                    (eval_k_pos[:, :32].sum(1) / eval_k_pos.sum(1)).mean().item(),
+                )
+
+                basis_dict["config"] = "one_per_decoder"
+                basis_dict["layer." + str(i) + ".mlp.down_proj"] = evec_down_proj.cpu()
+                basis_dict["layer." + str(i) + ".self_attn_mlp"] = evec_attn_mlp.cpu()
+                basis_dict["layer." + str(i) + ".self_attn.value"] = evec_value.cpu()
+                basis_dict["layer." + str(i) + ".self_attn.key_pos"] = evec_k_pos.cpu()
 
         torch.cuda.empty_cache()
 
-        inps, outs = outs, inps
-
-    if "per_layer" in rotation_granularity.lower():
-        for i in tqdm(range(nlayers), desc="(Getting Basis) Layers"):
-
-            # eigen decomposition of attn
-            eval_attn, evec_attn = perform_eigen_decomp(H_attn[i] / nbatches)
-
-            # eigen decomposition of up proj
-            eval_mlp, evec_mlp = perform_eigen_decomp(H_mlp[i] / nbatches)
-
-            # eigen decomposition of down proj
-            eval_down_proj, evec_down_proj = perform_eigen_decomp(
-                H_down_proj[i] / nbatches
-            )
-
-            # eigen decomposition of value states
-            eval_value, evec_value = perform_eigen_decomp(
-                H_value[i] / nbatches, per_head=True, num_heads=H_value.shape[0]
-            )
-
-            # eigen decomposition of key states after rope embedding
-            eval_k_pos, evec_k_pos = perform_eigen_decomp(
-                H_key_pos[i] / nbatches, per_head=True, num_heads=H_key_pos.shape[0]
-            )
-
-            print(
-                "up proj:",
-                (eval_mlp[0:100].sum() / eval_mlp.sum()).item(),
-                "down proj:",
-                (eval_down_proj[0:100].sum() / eval_down_proj.sum()).item(),
-                ", hidden_attn:",
-                (eval_attn[0:100].sum() / eval_attn.sum()).item(),
-                ", v_proj:",
-                (eval_value[:, :32].sum(1) / eval_value.sum(1)).mean().item(),
-                # ", kq_proj:",
-                # (eval_kq[:, :32].sum(1) / eval_kq.sum(1)).mean().item(),
-                ", k_proj_pos:",
-                (eval_k_pos[:, :32].sum(1) / eval_k_pos.sum(1)).mean().item(),
-            )
-
-            basis_dict["config"] = "per_layer_rotation"
-            basis_dict["layer." + str(i) + ".mlp"] = evec_mlp.cpu()
-            basis_dict["layer." + str(i) + ".mlp.down_proj"] = evec_down_proj.cpu()
-            basis_dict["layer." + str(i) + ".self_attn"] = evec_attn.cpu()
-            basis_dict["layer." + str(i) + ".self_attn.value"] = evec_value.cpu()
-            basis_dict["layer." + str(i) + ".self_attn.key_pos"] = evec_k_pos.cpu()
-
-    elif "full_shared" in rotation_granularity.lower():
-        # eigen decomposition of attn and mlp
-        eval_attn_mlp, evec_attn_mlp = perform_eigen_decomp(
-            (H_attn.sum(0) + H_mlp.sum(0)) / (2 * nbatches * nlayers)
+        torch.save(
+            basis_dict,
+            basis_path,
         )
-
-        basis_dict["config"] = "full_shared_rotation"
-        basis_dict["attn_mlp"] = evec_attn_mlp.cpu()
-
-        for i in tqdm(range(nlayers), desc="(Getting Rotations) Layers"):
-            # eigen decomposition of down proj
-            eval_down_proj, evec_down_proj = perform_eigen_decomp(
-                H_down_proj[i] / nbatches
-            )
-            # eigen decomposition of value states
-            eval_value, evec_value = perform_eigen_decomp(
-                H_value[i] / nbatches, per_head=True, num_heads=kv_heads
-            )
-            # eigen decomposition of key states after rope embedding
-            eval_k_pos, evec_k_pos = perform_eigen_decomp(
-                H_key_pos[i] / nbatches, per_head=True, num_heads=kv_heads
-            )
-
-            basis_dict["layer." + str(i) + ".self_attn.value"] = evec_value.cpu()
-            basis_dict["layer." + str(i) + ".self_attn.key_pos"] = evec_k_pos.cpu()
-            basis_dict["layer." + str(i) + ".mlp.down_proj"] = evec_down_proj.cpu()
-
-            print(
-                "down proj:",
-                (eval_down_proj[0:100].sum() / eval_down_proj.sum()).item(),
-                ", hidden_attn_mlp:",
-                (eval_attn_mlp[0:100].sum() / eval_attn_mlp.sum()).item(),
-                ", v_proj:",
-                (eval_value[:, :32].sum(1) / eval_value.sum(1)).mean().item(),
-                # ", kq_proj:",
-                # (eval_kq[:, :32].sum(1) / eval_kq.sum(1)).mean().item(),
-                ", k_proj_pos:",
-                (eval_k_pos[:, :32].sum(1) / eval_k_pos.sum(1)).mean().item(),
-            )
-
-    elif "one_per_decoder" in rotation_granularity.lower():
-
-        for i in tqdm(range(nlayers), desc="(Getting Basis) Layers"):
-            # eigen decomposition of attn and mlp
-            eval_attn_mlp, evec_attn_mlp = perform_eigen_decomp(
-                (H_attn[i] + H_mlp[i]) / (2 * nbatches)
-            )
-            # eigen decomposition of down proj
-            eval_down_proj, evec_down_proj = perform_eigen_decomp(
-                H_down_proj[i] / nbatches
-            )
-
-            # eigen decomposition of value states
-            eval_value, evec_value = perform_eigen_decomp(
-                H_value[i] / nbatches, per_head=True, num_heads=kv_heads
-            )
-
-            # eigen decomposition of key states after rope embedding
-            eval_k_pos, evec_k_pos = perform_eigen_decomp(
-                H_key_pos[i] / nbatches, per_head=True, num_heads=kv_heads
-            )
-
-            print(
-                "down proj:",
-                (eval_down_proj[0:100].sum() / eval_down_proj.sum()).item(),
-                ", attn_mlp:",
-                (eval_attn_mlp[0:100].sum() / eval_attn_mlp.sum()).item(),
-                ", v_proj:",
-                (eval_value[:, :32].sum(1) / eval_value.sum(1)).mean().item(),
-                # ", kq_proj:",
-                # (eval_kq[:, :32].sum(1) / eval_kq.sum(1)).mean().item(),
-                ", k_proj_pos:",
-                (eval_k_pos[:, :32].sum(1) / eval_k_pos.sum(1)).mean().item(),
-            )
-
-            basis_dict["config"] = "one_per_decoder"
-            basis_dict["layer." + str(i) + ".mlp.down_proj"] = evec_down_proj.cpu()
-            basis_dict["layer." + str(i) + ".self_attn_mlp"] = evec_attn_mlp.cpu()
-            basis_dict["layer." + str(i) + ".self_attn.value"] = evec_value.cpu()
-            basis_dict["layer." + str(i) + ".self_attn.key_pos"] = evec_k_pos.cpu()
-
-    torch.cuda.empty_cache()
-    os.makedirs(model_args.output_rotation_path, exist_ok=True)
-    path = os.path.join(
-        model_args.output_rotation_path,
-        "U-" + rotation_granularity + model_args.input_model.split("/")[1] + ".bin",
-    )
-
-    torch.save(
-        basis_dict,
-        path,
-    )
-
-    path = os.path.join(
-        model_args.output_rotation_path,
-        "R-" + model_args.input_model.split("/")[1] + ".bin",
-    )
-
-    torch.save(
-        rotation_dict,
-        path,
-    )
+    else:
+        print(f"Basis rotations already exist at {basis_path}")
 
 
 def perform_eigen_decomp(Cov_matrix, per_head=False, num_heads=0):
@@ -720,7 +744,6 @@ def perform_eigen_decomp(Cov_matrix, per_head=False, num_heads=0):
 
 if __name__ == "__main__":
     model_args, training_args, ptq_args = process_args_ptq()
-
     if ptq_args.rotate_mode == "quik":
         get_outlier_rotations(model_args, training_args, ptq_args)
     else:

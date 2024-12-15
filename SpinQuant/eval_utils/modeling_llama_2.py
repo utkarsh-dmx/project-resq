@@ -354,7 +354,7 @@ class LlamaMLP(nn.Module):
             down_proj = sum(down_proj)
         else:
             x = self.act_fn(self.gate_proj(x)) * self.up_proj(x)
-            down_proj = self.down_proj(x, column_order=self.new_column_order)
+            down_proj = self.down_proj(x)
 
         return down_proj
 
@@ -542,9 +542,7 @@ class LlamaAttention(nn.Module):
             )
         else:
             # rearrange attn_output and o_proj weight
-            if self.new_column_order is not None:
-                attn_output = attn_output[..., self.new_column_order]
-            attn_output = self.o_proj(attn_output)
+            attn_output = self.o_proj(attn_output, column_order=self.new_column_order)
 
         if not output_attentions:
             attn_weights = None
@@ -677,9 +675,9 @@ class LlamaFlashAttention2(LlamaAttention):
 
         attn_output = attn_output.reshape(bsz, q_len, -1).contiguous()
         # rearrange attn_output and o_proj weight
-        if self.new_column_order is not None:
-            attn_output = attn_output[..., self.new_column_order]
-        attn_output = self.o_proj(attn_output)
+        # if self.new_column_order is not None:
+        # attn_output = attn_output[..., self.new_column_order]
+        attn_output = self.o_proj(attn_output, column_order=self.new_column_order)
 
         if not output_attentions:
             attn_weights = None
@@ -794,9 +792,7 @@ class LlamaSdpaAttention(LlamaAttention):
         attn_output = attn_output.view(bsz, q_len, -1)
 
         # rearrange attn_output and o_proj weight
-        if self.new_column_order is not None:
-            attn_output = attn_output[..., self.new_column_order]
-
+        # attn_output = self.o_proj(attn_output, column_order=self.new_column_order)
         attn_output = self.o_proj(attn_output)
 
         return attn_output, None, past_key_value

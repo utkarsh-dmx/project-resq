@@ -22,19 +22,12 @@ from utils import quant_utils, utils
 
 
 class GPTQ:
-    def __init__(
-        self, layer, input_residual=False, output_residual=False, residual_length=0
-    ):
+    def __init__(self, layer, input_residual=False, residual_length=0):
         self.layer = layer
         self.dev = self.layer.weight.device
         W = layer.weight.data.clone()
         self.input_residual = input_residual  # keep 128 input channels FP
-        self.output_residual = output_residual  # keep 128 output channels FP
         self.residual_length = residual_length
-        # if input_residual:
-        #     W = W[:, self.residual_length :]
-        # if output_residual:
-        #     W = W[self.residual_length :, :]
         self.rows = W.shape[0]
         self.columns = W.shape[1]
         self.H = torch.zeros((self.columns, self.columns), device=self.dev)
@@ -50,8 +43,6 @@ class GPTQ:
         self.H *= self.nsamples / (self.nsamples + tmp)
         self.nsamples += tmp
         inp = math.sqrt(2 / self.nsamples) * inp.float()
-        # if self.input_residual:
-        #     inp = inp[128:, :]
         self.H += inp.matmul(inp.t())
 
     def fasterquant(
@@ -65,44 +56,25 @@ class GPTQ:
         W_org = self.layer.weight.data.clone()
         W_org = W_org.float()
         W = W_org.clone()
-        if self.input_residual and self.output_residual:
+        residual_dim = W_org.shape[-1] - self.residual_length
+        if self.input_residual:
             if not self.quantizer.ready():
-                self.quantizer.find_params(
-                    W[: -self.residual_length, : -self.residual_length]
-                )
+                self.quantizer.find_params(W[:, :residual_dim])
             if not self.input_residual_quantizer.ready():
-                self.input_residual_quantizer.find_params(W[:, -self.residual_length :])
-            if not self.output_residual_quantizer.ready():
-                self.output_residual_quantizer.find_params(
-                    W[-self.residual_length :, : -self.residual_length]
-                )
-        elif self.input_residual and not self.output_residual:
-            if not self.quantizer.ready():
-                self.quantizer.find_params(W[:, : -self.residual_length])
-            if not self.input_residual_quantizer.ready():
-                self.input_residual_quantizer.find_params(W[:, -self.residual_length :])
-        elif self.output_residual and not self.input_residual:
-            if not self.quantizer.ready():
-                self.quantizer.find_params(W[: -self.residual_length, :])
-            if not self.output_residual_quantizer.ready():
-                self.output_residual_quantizer.find_params(
-                    W[-self.residual_length :, :]
-                )
+                self.input_residual_quantizer.find_params(W[:, residual_dim:])
+
         else:
             if not self.quantizer.ready():
                 self.quantizer.find_params(W)
 
         tick = time.time()
-
         H = self.H
         del self.H
         dead = torch.diag(H) == 0
         H[dead, dead] = 1
         W[:, dead] = 0
         if static_groups:
-            assert (
-                not self.input_residual and not self.output_residual
-            )  # not supported/tested yet.
+            assert not self.input_residual  # not supported/tested yet.
             groups = []
             for i in range(0, self.columns, groupsize):
                 quantizer = copy.deepcopy(self.quantizer)
@@ -125,13 +97,9 @@ class GPTQ:
         H = torch.cholesky_inverse(H)
         H = torch.linalg.cholesky(H, upper=True)
         Hinv = H
-
         for i1 in range(0, self.columns, blocksize):
             i2 = min(i1 + blocksize, self.columns)
             count = i2 - i1
-
-            if i1 < self.residual_length:
-                use_residual_quantizer = True
 
             W1 = W[:, i1:i2].clone()
             Q1 = torch.zeros_like(W1)
@@ -153,19 +121,10 @@ class GPTQ:
                         if actorder:
                             idx = perm[idx]
                         self.quantizer = groups[idx // groupsize]
-                if self.input_residual and i1 > self.residual_length:
+                if self.input_residual and i1 >= residual_dim:
                     q = self.input_residual_quantizer.quantize(w.unsqueeze(1)).flatten()
                 else:
-                    if self.output_residual:
-                        q_2 = self.output_residual_quantizer.quantize(
-                            w[-self.residual_length :].unsqueeze(1)
-                        ).flatten()
-                        q_1 = self.quantizer.quantize(
-                            w[: -self.residual_length].unsqueeze(1)
-                        ).flatten()
-                        q = torch.cat([q_1, q_2], dim=0)
-                    else:
-                        q = self.quantizer.quantize(w.unsqueeze(1)).flatten()
+                    q = self.quantizer.quantize(w.unsqueeze(1)).flatten()
                 Q1[:, i] = q
                 Losses1[:, i] = (w - q) ** 2 / d**2
 
@@ -268,9 +227,8 @@ def gptq_fwrd(model, dataloader, dev, args):
         ["mlp.down_proj.module"],
     ]
 
-    if not (args.quarot or args.spinquant):
-        sequential.append(["basis_change_1.module"])
-        sequential.append(["basis_change_2.module"])
+    sequential.append(["basis_change_1.module"])
+    sequential.append(["basis_change_2.module"])
 
     model_dim = model.config.hidden_size
     residual_fraction = args.residual_fraction
@@ -291,15 +249,14 @@ def gptq_fwrd(model, dataloader, dev, args):
                     layer_weight_bits = 16
                     continue
                 if "basis_change" in name:
-                    layer_weight_bits = 8  #####
+                    layer_weight_bits = 16  #####
 
                 if args.int8_down_proj and "down_proj" in name:
                     layer_weight_bits = 8
                 input_residual = False
-                output_residual = False
                 residual_length = 0
 
-                if not (args.quarot or args.spinquant):
+                if args.rotate_mode == "resq":
                     # mixed precision quantization for weights
                     if (
                         "k_proj" in name
@@ -307,20 +264,13 @@ def gptq_fwrd(model, dataloader, dev, args):
                         or "v_proj" in name
                         or "up_proj" in name
                         or "gate_proj" in name
+                        or "o_proj" in name
                     ):
                         residual_length = int(residual_fraction * model_dim)
                         input_residual = True
-                    # if "o_proj" in name:
-                    #     output_residual = True
-                    #     # input_residual = True
-                    #     residual_length = int(residual_fraction * model_dim)
-                    # if "down_proj" in name:
-                    #     output_residual = True
-                    #     residual_length = int(residual_fraction * model_dim)
                 gptq[name] = GPTQ(
                     subset[name],
                     input_residual=input_residual,
-                    output_residual=output_residual,
                     residual_length=residual_length,
                 )
                 gptq[name].quantizer = quant_utils.WeightQuantizer()
@@ -333,14 +283,6 @@ def gptq_fwrd(model, dataloader, dev, args):
                 if gptq[name].input_residual:
                     gptq[name].input_residual_quantizer = quant_utils.WeightQuantizer()
                     gptq[name].input_residual_quantizer.configure(
-                        8,
-                        perchannel=True,
-                        sym=layer_weight_sym,
-                        mse=args.w_clip,
-                    )
-                if gptq[name].output_residual:
-                    gptq[name].output_residual_quantizer = quant_utils.WeightQuantizer()
-                    gptq[name].output_residual_quantizer.configure(
                         8,
                         perchannel=True,
                         sym=layer_weight_sym,
@@ -375,6 +317,11 @@ def gptq_fwrd(model, dataloader, dev, args):
                     static_groups=False,
                 )
                 quantizers["model.layers.%d.%s" % (i, name)] = gptq[name].quantizer
+                if input_residual:
+                    quantizers["model.layers.%d.%s,input_residual" % (i, name)] = gptq[
+                        name
+                    ].input_residual_quantizer
+
                 gptq[name].free()
 
         for j in range(args.nsamples):
@@ -408,6 +355,9 @@ def rtn_fwrd(model, dev, args):
 
     quantizers = {}
 
+    model_dim = model.config.hidden_size
+    residual_fraction = args.residual_fraction
+
     for i in tqdm.tqdm(range(len(layers)), desc="(RtN Quant.) Layers"):
         layer = layers[i].to(dev)
 
@@ -418,11 +368,25 @@ def rtn_fwrd(model, dev, args):
             if "lm_head" in name:
                 layer_weight_bits = 16
                 continue
-                # if "basis_change" in name:
-                #     layer_weight_bits = 16
-                # continue
+            if "basis_change" in name:
+                layer_weight_bits = 16  #####
+
             if args.int8_down_proj and "down_proj" in name:
                 layer_weight_bits = 8
+
+            residual_length = 0
+            input_residual = False
+            if args.rotate_mode == "resq":
+                if (
+                    "k_proj" in name
+                    or "q_proj" in name
+                    or "v_proj" in name
+                    or "up_proj" in name
+                    or "gate_proj" in name
+                    or "o_proj" in name
+                ):
+                    residual_length = int(residual_fraction * model_dim)
+                    input_residual = True
 
             quantizer = quant_utils.WeightQuantizer()
             quantizer.configure(
@@ -431,32 +395,36 @@ def rtn_fwrd(model, dev, args):
                 sym=not (args.w_asym),
                 mse=args.w_clip,
             )
-            if (
-                "k_proj" in name
-                or "q_proj" in name
-                or "v_proj" in name
-                or "up_proj" in name
-                or "gate_proj" in name
-            ):
-                W_org = subset[name].weight.data
-                W = W_org[:, 128:]
-                quantizer.find_params(W)
-                W = quantizer.quantize(W)
-                subset[name].weight.data = torch.cat((W_org[:, :128], W), dim=1).to(
-                    next(iter(layer.parameters())).dtype
+            if input_residual:
+                input_residual_quantizer = quant_utils.WeightQuantizer()
+                input_residual_quantizer.configure(
+                    8,
+                    perchannel=True,
+                    sym=not (args.w_asym),
+                    mse=args.w_clip,
                 )
-            elif "o_proj" in name or "down_proj" in name:
-                W_org = subset[name].weight.data
-                W = W_org[128:, :]
-                quantizer.find_params(W)
-                W = quantizer.quantize(W)
-                subset[name].weight.data = torch.cat((W_org[:128, :], W), dim=0).to(
-                    next(iter(layer.parameters())).dtype
-                )
+            W_org = subset[name].weight.data
+            residual_dim = W_org.shape[-1] - residual_length
+            if input_residual:
+                W1 = W_org[:, :residual_dim]
+                W2 = W_org[:, residual_dim:]
+                quantizer.find_params(W1)
+                input_residual_quantizer.find_params(W2)
+                W1 = quantizer.quantize(W1)
+                W2 = quantizer.quantize(W2)
+                W_org = torch.cat([W1, W2], dim=-1)
             else:
-                print(name)
+                quantizer.find_params(W_org)
+                quantizer.quantize(W_org)
+
+            subset[name].weight.data = W_org.to(next(iter(layer.parameters())).dtype)
 
             quantizers["model.layers.%d.%s" % (i, name)] = quantizer.cpu()
+            if input_residual:
+                quantizers["model.layers.%d.%s,input_residual" % (i, name)] = (
+                    input_residual_quantizer.cpu()
+                )
+
         layers[i] = layer.cpu()
         torch.cuda.empty_cache()
         del layer

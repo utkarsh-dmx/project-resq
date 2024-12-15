@@ -21,7 +21,6 @@ class QuantizeLinear(nn.Linear):
         R4=None,
         transpose=False,
         both=False,
-        rearrange_order=None,
         R1_2=None,
     ) -> Tensor:
         # quantize weight
@@ -73,11 +72,6 @@ class QuantizeLinear(nn.Linear):
             weight = weight.to(dtype)
         else:
             weight = self.weight
-
-        if rearrange_order is not None:
-            weight = weight @ rearrange_order.to(
-                device=weight.device, dtype=weight.dtype
-            )
 
         if hasattr(self, "quantizer"):
             dtype = weight.dtype

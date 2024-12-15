@@ -22,7 +22,7 @@ def ptq_model(args, model, model_args=None):
     transformers.set_seed(args.seed)
     model.eval()
     # Rotate the weights
-    if args.rotate:
+    if not args.rotate_mode == "none":
         fuse_norm_utils.fuse_layer_norms(model)
         if not (args.rotate_mode == "quarot" or args.rotate_mode == "spinquant"):
             rotation_utils.fuse_basis_to_model(model, args)
@@ -36,34 +36,6 @@ def ptq_model(args, model, model_args=None):
         qlayers = quant_utils.find_qlayers(model)
         for name in qlayers:
             if "down_proj" in name:
-                R_cpk = {}
-                if args.optimized_rotation_path is not None:
-                    R_cpk = torch.load(args.optimized_rotation_path)
-                    U_cpk = torch.load(args.optimized_basis_path)
-
-                # key = name.replace("down_proj", "R4_2")
-                # if key in R_cpk.keys():
-                #     R4_2 = R_cpk[key]
-                #     key = name.replace("down_proj", "R4_1")
-                #     if key in R_cpk.keys():
-                #         R4_1 = R_cpk[key]
-                #         R4 = torch.block_diag(R4_1, R4_2)
-                #     else:
-                #         R4 = R4_2
-                #     key = name.replace("layers", "layer")
-                #     key = key.replace("model.", "")
-                #     U4 = U_cpk[key].to(R4.device)
-
-                #     had_K = torch.matmul(
-                #         U4.to(torch.float64), R4.to(torch.float64)
-                #     ).float()
-                #     quantizer = quant_utils.WeightQuantizer()
-                #     quantizer.configure(8)
-                #     quantizer.find_params(had_K)
-                #     had_K = quantizer.quantize(had_K)
-                #     K = had_K.shape[0]
-                #     no_had = True
-                # else:
                 had_K, K = hadamard_utils.get_hadK(model.config.intermediate_size)
                 no_had = False
                 qlayers[name].online_full_had = True
@@ -124,7 +96,7 @@ def ptq_model(args, model, model_args=None):
             head_dim = model_dim // num_heads
             mlp_dim = model.config.intermediate_size
             v_groupsize = head_dim
-            if args.quarot or args.spinquant:
+            if args.rotate_mode == "quarot" or args.rotate_mode == "spinquant":
                 residual_length = 0
             else:
                 residual_fraction = args.residual_fraction
@@ -159,6 +131,7 @@ def ptq_model(args, model, model_args=None):
                 layer_input_bits = 8  #####
 
             if "down_proj" in name:  # Set the down_proj precision
+                residual_length = 0
                 if args.int8_down_proj:
                     layer_input_bits = 8
 
@@ -192,38 +165,41 @@ def ptq_model(args, model, model_args=None):
             }
 
             for idx, layer in enumerate(layers):
-                if args.quarot or args.spinquant:
-                    k_rotation = None
-                    k_had = True
-                else:
-                    k_rotation = U_cpk[f"layer.{idx}.self_attn.key_pos"].cuda()
+                if not args.rotate_mode == "none":
+                    if not (
+                        args.rotate_mode == "quarot" or args.rotate_mode == "spinquant"
+                    ):
+                        k_rotation = None
+                        k_had = True
+                    else:
+                        k_rotation = U_cpk[f"layer.{idx}.self_attn.key_pos"].cuda()
 
-                    rot2 = random_orthogonal_matrix(residual_length_k, "cuda")
-                    rot1 = random_orthogonal_matrix(
-                        layer.self_attn.head_dim - residual_length_k, "cuda"
+                        rot2 = random_orthogonal_matrix(residual_length_k, "cuda")
+                        rot1 = random_orthogonal_matrix(
+                            layer.self_attn.head_dim - residual_length_k, "cuda"
+                        )
+
+                        k_rotation_1 = torch.matmul(
+                            k_rotation[:, :-residual_length_k], rot1
+                        )
+                        k_rotation_2 = torch.matmul(
+                            k_rotation[:, -residual_length_k:], rot2
+                        )
+                        k_rotation = torch.cat([k_rotation_1, k_rotation_2], dim=-1)
+
+                        quantizer = quant_utils.WeightQuantizer()
+                        quantizer.configure(8)
+                        quantizer.find_params(k_rotation)
+                        k_rotation = quantizer.quantize(k_rotation)
+                        k_had = False
+
+                    rotation_utils.add_qk_rotation_wrapper_after_function_call_in_forward(
+                        layer.self_attn,
+                        rope_function_name,
+                        config=model.config,
+                        k_rotation=k_rotation,
+                        k_had=k_had,
+                        **k_quant_config,
                     )
-
-                    k_rotation_1 = torch.matmul(
-                        k_rotation[:, :, :-residual_length_k], rot1
-                    )
-                    k_rotation_2 = torch.matmul(
-                        k_rotation[:, :, -residual_length_k:], rot2
-                    )
-                    k_rotation = torch.cat([k_rotation_1, k_rotation_2], dim=-1)
-
-                    quantizer = quant_utils.WeightQuantizer()
-                    quantizer.configure(8)
-                    quantizer.find_params(k_rotation)
-                    k_rotation = quantizer.quantize(k_rotation)
-                    k_had = False
-
-                rotation_utils.add_qk_rotation_wrapper_after_function_call_in_forward(
-                    layer.self_attn,
-                    rope_function_name,
-                    config=model.config,
-                    k_rotation=k_rotation,
-                    k_had=k_had,
-                    **k_quant_config,
-                )
 
     return model

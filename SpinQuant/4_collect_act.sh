@@ -6,7 +6,7 @@
 # LICENSE file in the root directory of this source tree.
 
 ### k_groupsize, v_groupsize = 64 only for Llama-3.2-1B else 128
-torchrun --nnodes=1 --nproc_per_node=1 collect_activations.py \
+torchrun --nnodes=1 --nproc_per_node=1 --master_port=24556 collect_activations.py \
 --input_model meta-llama/Meta-Llama-3-8B \
 --do_train False \
 --do_eval True \
@@ -25,10 +25,10 @@ torchrun --nnodes=1 --nproc_per_node=1 collect_activations.py \
 --k_groupsize 128 \
 --v_groupsize 128 \
 --residual_fraction 0.125 \
---optimized_basis_path ./rotation/U-full_sharedMeta-Llama-3-8B.bin \
---optimized_rotation_path ./rotation/R-Meta-Llama-3-8B.bin \
+--optimized_basis_path ./rotation/U-outliersMeta-Llama-3-8B.bin \
+--optimized_rotation_path ./rotation/R-0.125-Meta-Llama-3-8B.bin \
 --output_dir "output/" \
---rotate_mode 'none' \
+--rotate_mode 'quik' \
 --rotation_granularity 'full_shared' \
---capture_layer_io \
---layer_idx 14 \
+--layerwise_mse \
+--layer_idx 26 \

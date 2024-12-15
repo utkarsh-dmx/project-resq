@@ -6,18 +6,18 @@
 # LICENSE file in the root directory of this source tree.
 
 ### k_groupsize, v_groupsize = 64 only for Llama-3.2-1B else 128
-torchrun --nnodes=1 --nproc_per_node=1 --master_port=24559 ptq.py \
---input_model $1 \
+torchrun --nnodes=1 --nproc_per_node=1 --master_port=24553 ptq.py \
+--input_model meta-llama/Llama-3.2-3B \
 --do_train False \
 --do_eval True \
---per_device_eval_batch_size 8 \
+--per_device_eval_batch_size 16 \
 --model_max_length 2048 \
 --fp16 False \
 --bf16 True \
---w_bits $2 \
---a_bits $3 \
---k_bits $4 \
---v_bits $5 \
+--w_bits 4 \
+--a_bits 4 \
+--k_bits 4 \
+--v_bits 4 \
 --w_clip \
 --a_asym \
 --k_asym \
@@ -25,9 +25,12 @@ torchrun --nnodes=1 --nproc_per_node=1 --master_port=24559 ptq.py \
 --k_groupsize 128 \
 --v_groupsize 128 \
 --rotate \
---residual_fraction $6 \
---optimized_rotation_path $7 \
---optimized_basis_path $8 \
---rotation_granularity $9 \
+--residual_fraction 0.125 \
+--rotate_mode "resq" \
+--optimized_rotation_path ./rotation/R-0.125-Llama-3.2-3B.bin \
+--optimized_basis_path ./rotation/U-c4-512-Llama-3.2-3B.bin \
+--rotation_granularity 'full_shared' \
 --tasks "mmlu" \
---load_qmodel_path ./resq-meta-llama-3-8b \
+--rotate \
+--flash_attn \
+

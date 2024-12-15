@@ -45,6 +45,73 @@ def get_wikitext2(
         return trainloader
 
 
+def get_c4(
+    nsamples=128, seed=0, seqlen=2048, model="", tokenizer=None, eval_mode=False
+):
+    print("get_c4")
+
+    if tokenizer is None:
+        tokenizer = transformers.AutoTokenizer.from_pretrained(model, use_fast=False)
+
+    if eval_mode:
+        valdata = datasets.load_dataset(
+            "allenai/c4",
+            data_files={"validation": "en/c4-validation.00000-of-00008.json.gz"},
+            split="validation",
+        )
+        random.seed(0)
+        valenc = []
+        for _ in range(256):
+            while True:
+                i = random.randint(0, len(valdata) - 1)
+                tmp = tokenizer(valdata[i]["text"], return_tensors="pt")
+                if tmp.input_ids.shape[1] > seqlen:
+                    break
+            i = random.randint(0, tmp.input_ids.shape[1] - seqlen - 1)
+            j = i + seqlen
+            valenc.append(tmp.input_ids[:, i:j])
+        valenc = torch.hstack(valenc)
+        return valenc
+    else:
+        random.seed(seed)
+        traindata = datasets.load_dataset(
+            "allenai/c4",
+            data_files={"train": "en/c4-train.00000-of-01024.json.gz"},
+            split="train",
+        )
+        trainloader = []
+        for _ in range(nsamples):
+            while True:
+                i = random.randint(0, len(traindata) - 1)
+                trainenc = tokenizer(traindata[i]["text"], return_tensors="pt")
+                if trainenc.input_ids.shape[1] > seqlen:
+                    break
+            i = random.randint(0, trainenc.input_ids.shape[1] - seqlen - 1)
+            j = i + seqlen
+            inp = trainenc.input_ids[:, i:j]
+            tar = inp.clone()
+            tar[:, :-1] = -100
+            trainloader.append((inp, tar))
+        return trainloader
+
+
+def get_data(
+    calib_dataset="wikitext",
+    nsamples=128,
+    seed=0,
+    seqlen=2048,
+    model="",
+    tokenizer=None,
+    eval_mode=False,
+):
+    if "wikitext" in calib_dataset:
+        return get_wikitext2(nsamples, seed, seqlen, model, tokenizer, eval_mode)
+    elif "c4" in calib_dataset:
+        return get_c4(nsamples, seed, seqlen, model, tokenizer, eval_mode)
+    else:
+        raise NotImplementedError
+
+
 class CustomJsonDataset(torch.utils.data.IterableDataset):
     def __init__(self, dataset, tokenizer, block_size: int = 1024) -> None:
         raw_data = dataset

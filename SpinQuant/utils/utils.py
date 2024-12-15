@@ -128,7 +128,9 @@ def cleanup_memory(verbos=True) -> None:
 
 
 # Define a utility method for setting the logging parameters of a logger
-def get_logger(logger_name: Optional[str]) -> logging.Logger:
+def get_logger(
+    logger_name: Optional[str], log_file_name: Optional[str]
+) -> logging.Logger:
     # Get the logger with the specified name
     logger = logging.getLogger(logger_name)
 
@@ -146,6 +148,12 @@ def get_logger(logger_name: Optional[str]) -> logging.Logger:
 
     # Add the console handler to the logger
     logger.addHandler(console_handler)
+
+    file_handler = logging.FileHandler(log_file_name)
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(formatter)
+
+    logger.addHandler(file_handler)
 
     return logger
 
