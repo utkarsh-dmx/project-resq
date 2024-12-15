@@ -1,6 +1,5 @@
 .ninja_deps
 *.o
-*.json
 *.log
 *.pyc
 *.so
