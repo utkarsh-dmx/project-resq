@@ -30,7 +30,7 @@ torchrun --nnodes=1 --nproc_per_node=1 --master_port=24553 ptq.py \
 --optimized_rotation_path ./rotation/R-0.125-Llama-3.2-3B.bin \
 --optimized_basis_path ./rotation/U-wikitext-512-Llama-3.2-3B.bin \
 --rotation_granularity 'full_shared' \
---tasks "mmlu"
+--tasks "mmlu" \
 --rotate \
 --flash_attn \
 
