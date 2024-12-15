@@ -1,0 +1,10 @@
+transformers==4.46.0
+sentencepiece
+accelerate==1.2.1
+datasets==2.20.0
+lm-eval==0.4.5
+tqdm
+rouge
+jieba
+fuzzywuzzy
+flash-attn==2.7.2.post1
