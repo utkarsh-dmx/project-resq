@@ -14,4 +14,4 @@ python get_basis.py \
 --rotation_granularity "full_shared" \
 --rotate_mode "resq" \
 --nsamples 512 \
---calib_dataset "c4" \
+--calib_dataset "wikitext" \

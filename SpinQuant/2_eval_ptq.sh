@@ -14,7 +14,7 @@ torchrun --nnodes=1 --nproc_per_node=1 --master_port=24553 ptq.py \
 --model_max_length 2048 \
 --fp16 False \
 --bf16 True \
---w_bits 4 \
+--w_bits 16 \
 --a_bits 4 \
 --k_bits 4 \
 --v_bits 4 \
@@ -28,9 +28,9 @@ torchrun --nnodes=1 --nproc_per_node=1 --master_port=24553 ptq.py \
 --residual_fraction 0.125 \
 --rotate_mode "resq" \
 --optimized_rotation_path ./rotation/R-0.125-Llama-3.2-3B.bin \
---optimized_basis_path ./rotation/U-c4-512-Llama-3.2-3B.bin \
+--optimized_basis_path ./rotation/U-wikitext-512-Llama-3.2-3B.bin \
 --rotation_granularity 'full_shared' \
---tasks "mmlu" \
+--long_bench_tasks "samsum" \
 --rotate \
 --flash_attn \
 
