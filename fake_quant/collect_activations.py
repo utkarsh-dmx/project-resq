@@ -514,7 +514,12 @@ def layerwise_mse(model_args, training_args, ptq_args, model, calib_data):
         R1_2 = R_dict["R1_2"].cuda().to(torch.float64)
         R1 = torch.block_diag(R1_1, R1_2).cuda()
         U_cpk = torch.load(ptq_args.optimized_basis_path)
-        U = torch.matmul(U_cpk["attn_mlp"].cuda(), R1).cuda()
+        U_mlp_attn = U_cpk["attn_mlp"].cuda()
+        e_cpk = torch.load(ptq_args.optimized_basis_path.replace("U", "E"))
+        e_mlp_attn = e_cpk["attn_mlp"].cuda()
+        scale = torch.diag(1 / (e_mlp_attn).sqrt()).pow(0.5)
+        U_mlp_attn = torch.matmul(U_mlp_attn, scale)
+        U = torch.matmul(U_mlp_attn, R1).cuda()
         rotate_flag = True
 
     elif ptq_args.rotate_mode == "quarot":
@@ -577,7 +582,6 @@ def layerwise_mse(model_args, training_args, ptq_args, model, calib_data):
                 else:
                     inp_k = torch.matmul(inp_k.cuda(), U.to(inp_k.dtype)).cpu()
                     inp_up = torch.matmul(inp_up.cuda(), U.to(inp_up.dtype)).cpu()
-
             q1.find_params(inp_k)
             inpq_k = q1(inp_k)
             q1.free()
@@ -594,10 +598,11 @@ def layerwise_mse(model_args, training_args, ptq_args, model, calib_data):
                     inpq_k = torch.matmul(inpq_k.cuda(), UA.t().to(inpq_k.dtype)).cpu()
 
                 else:
+                    U_INV = torch.inverse(U)
                     inpq_up = torch.matmul(
-                        inpq_up.cuda(), U.t().to(inpq_up.dtype)
+                        inpq_up.cuda(), U_INV.to(inpq_up.dtype)
                     ).cpu()
-                    inpq_k = torch.matmul(inpq_k.cuda(), U.t().to(inpq_k.dtype)).cpu()
+                    inpq_k = torch.matmul(inpq_k.cuda(), U_INV.to(inpq_k.dtype)).cpu()
             error1 = inpq_k - dumped_inps["k_proj"]
             mse1 = (error1).pow(2).sum(-1).mean()
             snr1 = 10 * torch.log10(
@@ -613,7 +618,6 @@ def layerwise_mse(model_args, training_args, ptq_args, model, calib_data):
             snr_attn.append(snr1)
             mse_mlp.append(mse2)
             snr_mlp.append(snr2)
-
             del inp_k, inp_up, inpq_up, inpq_k, captured_io, dumped_inps
             torch.cuda.empty_cache()
 
@@ -779,44 +783,44 @@ def collect_act():
         with torch.no_grad():
             # for rotate_mode in ["none", "resq", "quik", "quarot"]:
             # ptq_args.rotate_mode = rotate_mode
-            # save_path_attn_mse = os.path.join(
-            #     ptq_args.output_dir, ptq_args.rotate_mode, "attn_mse.pt"
-            # )
+            save_path_attn_mse = os.path.join(
+                ptq_args.output_dir, ptq_args.rotate_mode, "attn_mse.pt"
+            )
 
-            # save_path_attn_snr = os.path.join(
-            #     ptq_args.output_dir, ptq_args.rotate_mode, "attn_snr.pt"
-            # )
+            save_path_attn_snr = os.path.join(
+                ptq_args.output_dir, ptq_args.rotate_mode, "attn_snr.pt"
+            )
 
-            # save_path_mlp_mse = os.path.join(
-            #     ptq_args.output_dir, ptq_args.rotate_mode, "mlp_mse.pt"
-            # )
+            save_path_mlp_mse = os.path.join(
+                ptq_args.output_dir, ptq_args.rotate_mode, "mlp_mse.pt"
+            )
 
-            # save_path_mlp_snr = os.path.join(
-            #     ptq_args.output_dir, ptq_args.rotate_mode, "mlp_snr.pt"
-            # )
+            save_path_mlp_snr = os.path.join(
+                ptq_args.output_dir, ptq_args.rotate_mode, "mlp_snr.pt"
+            )
 
-            # os.makedirs(os.path.dirname(save_path_attn_mse), exist_ok=True)
-            # os.makedirs(os.path.dirname(save_path_attn_snr), exist_ok=True)
-            # os.makedirs(os.path.dirname(save_path_mlp_mse), exist_ok=True)
-            # os.makedirs(os.path.dirname(save_path_mlp_snr), exist_ok=True)
+            os.makedirs(os.path.dirname(save_path_attn_mse), exist_ok=True)
+            os.makedirs(os.path.dirname(save_path_attn_snr), exist_ok=True)
+            os.makedirs(os.path.dirname(save_path_mlp_mse), exist_ok=True)
+            os.makedirs(os.path.dirname(save_path_mlp_snr), exist_ok=True)
 
-            # error_attn, error_mlp, snr_attn, snr_mlp = layerwise_mse(
-            #     model_args, training_args, ptq_args, model, calib_data
-            # )
+            error_attn, error_mlp, snr_attn, snr_mlp = layerwise_mse(
+                model_args, training_args, ptq_args, model, calib_data
+            )
 
-            # torch.save(error_attn, save_path_attn_mse)
-            # torch.save(snr_attn, save_path_attn_snr)
-            # torch.save(error_mlp, save_path_mlp_mse)
-            # torch.save(snr_mlp, save_path_mlp_snr)
-            # print(
-            #     f"Rotate Mode : {ptq_args.rotate_mode} error attn = {error_attn} error mlp = {error_mlp} snr attn = {snr_attn} snr mlp = {snr_mlp}"
-            # )
+            torch.save(error_attn, save_path_attn_mse)
+            torch.save(snr_attn, save_path_attn_snr)
+            torch.save(error_mlp, save_path_mlp_mse)
+            torch.save(snr_mlp, save_path_mlp_snr)
+            print(
+                f"Rotate Mode : {ptq_args.rotate_mode} error attn = {error_attn} error mlp = {error_mlp} snr attn = {snr_attn} snr mlp = {snr_mlp}"
+            )
 
-            plot_mse_error(ptq_args)
+            # plot_mse_error(ptq_args)
 
 
 if __name__ == "__main__":
-    # collect_act()
+    collect_act()
     # plot_rank_ablation()
     # plot_samples_ablation()
-    plot_layer_benchmark()
+    # plot_layer_benchmark()

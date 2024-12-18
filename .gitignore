@@ -5,7 +5,6 @@
 *.so
 *.bin
 build/*
-quarot.egg-info/*
 *.cmake
 *.in
 CMakeFiles/*
@@ -18,4 +17,5 @@ fake_quant/finetune_logs/
 *.safetensors
 *.png
 resq-*
-SpinQuant/output/*
+fake_quant/output/*
+fast-hadamard-transform/*

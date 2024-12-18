@@ -15,3 +15,4 @@ python get_basis.py \
 --rotate_mode "resq" \
 --nsamples 512 \
 --calib_dataset "wikitext" \
+--sparse_fraction 0.0 \

@@ -216,7 +216,12 @@ def apply_exact_had_to_linear(module, had_dim=-1, output=False, R2=None, per_hea
                 for i in range(num_kv_heads):
                     for j in range(num_kv_groups):
                         idx = j + num_kv_groups * i
-                        temp[:,idx,:] = temp[:,idx,:].to(torch.float64) @ torch.inverse(hadK[i]).t()
+                        try:
+                            inverse = torch.inverse(hadK[i]).t()
+                        except torch._C._LinAlgError:
+                            inverse = hadK[i]
+                        # temp[:,idx,:] = temp[:,idx,:].to(torch.float64) @ torch.inverse(hadK[i]).t()
+                        temp[:,idx,:] = temp[:,idx,:].to(torch.float64) @ inverse
             else:
                 temp = temp.to(torch.float64) @ torch.inverse(hadK).t()
             W_ = temp.reshape(init_shape)

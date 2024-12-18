@@ -222,6 +222,13 @@ def parser_gen():
     )
 
     parser.add_argument(
+        "--sparse_fraction",
+        type=float,
+        default=0,
+        help="Fraction of channels to prune.",
+    )
+
+    parser.add_argument(
         "--down_proj_blocksize",
         type=int,
         default=1024,
