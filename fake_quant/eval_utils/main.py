@@ -24,11 +24,11 @@ def ptq_model(args, model, model_args=None):
     # Rotate the weights
     if not args.rotate_mode == "none":
         fuse_norm_utils.fuse_layer_norms(model)
-        if not (args.rotate_mode == "quarot" or args.rotate_mode == "spinquant"):
+        if args.rotate_mode == "resq" or args.rotate_mode == "quik":
             rotation_utils.fuse_basis_to_model(model, args)
         else:
             rotation_utils.rotate_model(model, args)
-        if not (args.rotate_mode == "quarot" or args.rotate_mode == "spinquant"):
+        if args.rotate_mode == "resq" or args.rotate_mode == "quik":
             rotation_utils.rearrange_columns(model, args, False)
 
         utils.cleanup_memory(verbos=True)
@@ -96,18 +96,20 @@ def ptq_model(args, model, model_args=None):
             head_dim = model_dim // num_heads
             mlp_dim = model.config.intermediate_size
             v_groupsize = head_dim
-            if args.rotate_mode == "quarot" or args.rotate_mode == "spinquant":
-                residual_length = 0
-            else:
+            if args.rotate_mode == "resq" or args.rotate_mode == "quik":
                 residual_fraction = args.residual_fraction
                 residual_length = int(residual_fraction * model_dim)
 
+            else:
+                residual_length = 0
+
             if "v_proj" in name and args.v_bits < 16:  # Set the v_proj precision
-                if args.rotate_mode == "quarot" or args.rotate_mode == "spinquant":
-                    v_residual_length = 0
-                else:
+                if args.rotate_mode == "resq" or args.rotate_mode == "quik":
                     # per group residual
                     v_residual_length = int(v_groupsize * residual_fraction)
+                else:
+                    v_residual_length = 0
+
                 qlayers[name].out_quantizer.configure(
                     bits=args.v_bits,
                     groupsize=v_groupsize,
@@ -118,11 +120,11 @@ def ptq_model(args, model, model_args=None):
                 )
             if "o_proj" in name:
                 layer_groupsize = head_dim
-                if args.rotate_mode == "quarot" or args.rotate_mode == "spinquant":
-                    residual_length = 0
-                else:
+                if args.rotate_mode == "resq" or args.rotate_mode == "quik":
                     # per group residual
                     residual_length = int(v_groupsize * residual_fraction)
+                else:
+                    residual_length = 0
 
             if "lm_head" in name:  # Skip lm_head quantization
                 layer_input_bits = 16
@@ -150,11 +152,12 @@ def ptq_model(args, model, model_args=None):
         else:
             rope_function_name = "apply_rotary_pos_emb"
             layers = model.model.layers
-            if args.rotate_mode == "quarot" or args.rotate_mode == "spinquant":
-                residual_length_k = 0
-            else:
+            if args.rotate_mode == "resq" or args.rotate_mode == "quik":
                 U_cpk = torch.load(args.optimized_basis_path)
                 residual_length_k = int(args.residual_fraction * head_dim)
+            else:
+                residual_length_k = 0
+
             k_quant_config = {
                 "k_bits": args.k_bits,
                 "k_bits_residual": 8,
@@ -165,41 +168,37 @@ def ptq_model(args, model, model_args=None):
             }
 
             for idx, layer in enumerate(layers):
-                if not args.rotate_mode == "none":
-                    if not (
-                        args.rotate_mode == "quarot" or args.rotate_mode == "spinquant"
-                    ):
-                        k_rotation = None
-                        k_had = True
-                    else:
-                        k_rotation = U_cpk[f"layer.{idx}.self_attn.key_pos"].cuda()
+                if args.rotate_mode == "resq" or args.rotate_mode == "quik":
+                    k_rotation = U_cpk[f"layer.{idx}.self_attn.key_pos"].cuda()
 
-                        rot2 = random_orthogonal_matrix(residual_length_k, "cuda")
-                        rot1 = random_orthogonal_matrix(
-                            layer.self_attn.head_dim - residual_length_k, "cuda"
-                        )
-
-                        k_rotation_1 = torch.matmul(
-                            k_rotation[:, :-residual_length_k], rot1
-                        )
-                        k_rotation_2 = torch.matmul(
-                            k_rotation[:, -residual_length_k:], rot2
-                        )
-                        k_rotation = torch.cat([k_rotation_1, k_rotation_2], dim=-1)
-
-                        quantizer = quant_utils.WeightQuantizer()
-                        quantizer.configure(8)
-                        quantizer.find_params(k_rotation)
-                        k_rotation = quantizer.quantize(k_rotation)
-                        k_had = False
-
-                    rotation_utils.add_qk_rotation_wrapper_after_function_call_in_forward(
-                        layer.self_attn,
-                        rope_function_name,
-                        config=model.config,
-                        k_rotation=k_rotation,
-                        k_had=k_had,
-                        **k_quant_config,
+                    rot2 = random_orthogonal_matrix(residual_length_k, "cuda")
+                    rot1 = random_orthogonal_matrix(
+                        layer.self_attn.head_dim - residual_length_k, "cuda"
                     )
+
+                    k_rotation_1 = torch.matmul(
+                        k_rotation[:, :-residual_length_k], rot1
+                    )
+                    k_rotation_2 = torch.matmul(
+                        k_rotation[:, -residual_length_k:], rot2
+                    )
+                    k_rotation = torch.cat([k_rotation_1, k_rotation_2], dim=-1)
+
+                    quantizer = quant_utils.WeightQuantizer()
+                    quantizer.configure(8)
+                    quantizer.find_params(k_rotation)
+                    k_rotation = quantizer.quantize(k_rotation)
+                    k_had = False
+                else:
+                    k_rotation = None
+                    k_had = True
+                rotation_utils.add_qk_rotation_wrapper_after_function_call_in_forward(
+                    layer.self_attn,
+                    rope_function_name,
+                    config=model.config,
+                    k_rotation=k_rotation,
+                    k_had=k_had,
+                    **k_quant_config,
+                )
 
     return model

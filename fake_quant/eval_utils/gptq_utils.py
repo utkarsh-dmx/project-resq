@@ -141,6 +141,7 @@ class GPTQ:
 
         if actorder:
             Q = Q[:, invperm]
+
         self.layer.weight.data = Q.reshape(self.layer.weight.shape).to(
             self.layer.weight.data.dtype
         )
@@ -405,6 +406,7 @@ def rtn_fwrd(model, dev, args):
                 )
             W_org = subset[name].weight.data
             residual_dim = W_org.shape[-1] - residual_length
+
             if input_residual:
                 W1 = W_org[:, :residual_dim]
                 W2 = W_org[:, residual_dim:]
@@ -415,7 +417,7 @@ def rtn_fwrd(model, dev, args):
                 W_org = torch.cat([W1, W2], dim=-1)
             else:
                 quantizer.find_params(W_org)
-                quantizer.quantize(W_org)
+                W_org = quantizer.quantize(W_org)
 
             subset[name].weight.data = W_org.to(next(iter(layer.parameters())).dtype)
 

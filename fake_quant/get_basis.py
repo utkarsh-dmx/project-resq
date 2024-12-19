@@ -13,12 +13,7 @@ import datasets
 import torch
 import torch.distributed as dist
 from torch import nn
-from transformers import (
-    LlamaForCausalLM,
-    LlamaTokenizerFast,
-    Trainer,
-    default_data_collator,
-)
+from transformers import AutoTokenizer, AutoModelForCausalLM
 from utils.data_utils import get_data
 from train_utils.fsdp_trainer import FSDPTrainer
 from train_utils.main import prepare_model
@@ -38,7 +33,7 @@ log: Logger = get_logger("resq", "get_basis.log")
 @torch.no_grad()
 def get_outlier_rotations(model_args, training_args, ptq_args) -> None:
 
-    model = LlamaForCausalLM.from_pretrained(
+    model = AutoModelForCausalLM.from_pretrained(
         pretrained_model_name_or_path=model_args.input_model,
         torch_dtype=torch.float32,
     )
@@ -54,7 +49,7 @@ def get_outlier_rotations(model_args, training_args, ptq_args) -> None:
 
     log.info("Model init completed for training {}".format(model))
     log.info("Start to load tokenizer...")
-    tokenizer = LlamaTokenizerFast.from_pretrained(
+    tokenizer = AutoTokenizer.from_pretrained(
         pretrained_model_name_or_path=model_args.input_model,
         cache_dir=training_args.cache_dir,
         model_max_length=training_args.model_max_length,
@@ -74,7 +69,6 @@ def get_outlier_rotations(model_args, training_args, ptq_args) -> None:
         nsamples=ptq_args.nsamples,
         calib_dataset=ptq_args.calib_dataset,
     )
-
     nbatches = len(train_data)
     layers = model.model.layers
     model.model.embed_tokens = model.model.embed_tokens.to(utils.DEV)
@@ -288,7 +282,7 @@ def get_outlier_rotations(model_args, training_args, ptq_args) -> None:
 @torch.no_grad()
 def get_basis(model_args, training_args, ptq_args) -> None:
 
-    model = LlamaForCausalLM.from_pretrained(
+    model = AutoModelForCausalLM.from_pretrained(
         pretrained_model_name_or_path=model_args.input_model,
         torch_dtype=torch.float32,
     )
@@ -296,14 +290,14 @@ def get_basis(model_args, training_args, ptq_args) -> None:
     transformers.set_seed(ptq_args.seed)
     model.eval()
 
-    # Rotate the weights
+    # Fuse Norm
     fuse_norm_utils.fuse_layer_norms(model)
 
     utils.cleanup_memory(verbos=True)
 
     log.info("Model init completed for training {}".format(model))
     log.info("Start to load tokenizer...")
-    tokenizer = LlamaTokenizerFast.from_pretrained(
+    tokenizer = AutoTokenizer.from_pretrained(
         pretrained_model_name_or_path=model_args.input_model,
         cache_dir=training_args.cache_dir,
         model_max_length=training_args.model_max_length,
@@ -326,8 +320,8 @@ def get_basis(model_args, training_args, ptq_args) -> None:
     nbatches = len(train_data)
     layers = model.model.layers
     model.model.embed_tokens = model.model.embed_tokens.to(utils.DEV)
-    model.model.rotary_emb = model.model.rotary_emb.to(utils.DEV)
-    # model.R1.weight.data.copy_() = model.R1.to(utils.DEV)
+    if hasattr(model.model, "rotary_emb"):
+        model.model.rotary_emb = model.model.rotary_emb.to(utils.DEV)
 
     layers[0] = layers[0].to(utils.DEV)
 
@@ -351,7 +345,8 @@ def get_basis(model_args, training_args, ptq_args) -> None:
             cache["i"] += 1
             cache["attention_mask"] = kwargs["attention_mask"]
             cache["position_ids"] = kwargs["position_ids"]
-            cache["position_embeddings"] = kwargs["position_embeddings"]
+            if "position_embeddings" in kwargs:
+                cache["position_embeddings"] = kwargs["position_embeddings"]
             raise ValueError
 
     layers[0] = Catcher(layers[0])
@@ -365,8 +360,8 @@ def get_basis(model_args, training_args, ptq_args) -> None:
     layers[0] = layers[0].cpu()
 
     model.model.embed_tokens = model.model.embed_tokens.cpu()
-    model.model.rotary_emb = model.model.rotary_emb.cpu()
-
+    if hasattr(model.model, "rotary_emb"):
+        model.model.rotary_emb = model.model.rotary_emb.cpu()
     position_ids = cache["position_ids"]
     position_embeddings = cache["position_embeddings"]
 

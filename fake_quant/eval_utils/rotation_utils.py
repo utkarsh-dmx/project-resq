@@ -193,6 +193,13 @@ def rotate_model(model, args):
     if args.rotate_mode == "quarot":
         R1 = get_orthogonal_matrix(model.config.hidden_size, "hadamard")
         R2 = get_orthogonal_matrix(head_dim, "hadamard")
+    elif args.rotate_mode == "spinquant":
+        if args.optimized_rotation_path is not None:
+            R_cpk = args.optimized_rotation_path
+            R1 = torch.load(R_cpk)["R1"].cuda().to(torch.float64)
+        else:
+            print("You have not provided the rotation path")
+            raise ValueError
 
     R4 = None
     no_had = False
@@ -202,7 +209,13 @@ def rotate_model(model, args):
     layers = [layer for layer in model.model.layers]
 
     for idx, layer in enumerate(tqdm.tqdm(layers, unit="layer", desc="Rotating")):
-
+        if args.rotate_mode == "spinquant":
+            if args.optimized_rotation_path is not None:
+                key = f"model.layers.{idx}.self_attn.R2"
+                R2 = torch.load(R_cpk)[key].cuda().to(torch.float64)
+            else:
+                print("You have not provided the rotation path")
+                raise ValueError
         rotate_attention_inputs(layers[idx], R1)
         rotate_attention_output(layers[idx], R1)
         rotate_mlp_input(layers[idx], R1)
@@ -364,10 +377,17 @@ def fuse_basis_shared(model, args):
     )  # checking if rotation dimensions align with residual length
     head_dim = model_dim // num_heads
     U_cpk = torch.load(args.optimized_basis_path)
-    U_attn = torch.matmul(U_cpk["attn_mlp"].cuda(), R1)
+    # e_cpk = torch.load(args.optimized_basis_path.replace("U", "E"))
+    # e_mlp_attn = e_cpk["attn_mlp"].cuda()
+    # scale = torch.diag(1 / (e_mlp_attn).sqrt()).pow(0.5)
+
+    U_attn = U_cpk["attn_mlp"].cuda()
+    # U_attn = torch.matmul(U_attn, scale)
+    U_attn = torch.matmul(U_attn, R1)
+    # breakpoint()
     torch.distributed.barrier()
     rotate_embeddings(model, U_attn)
-    rotate_head(model, U_attn)
+    rotate_head(model, torch.inverse(U_attn).t())
 
     utils.cleanup_memory()
 

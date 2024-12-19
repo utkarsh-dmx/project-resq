@@ -560,6 +560,7 @@ class WeightQuantizer(torch.nn.Module):
         if self.ready() and self.bits < 16:
             if self.sym:
                 return STEQuantize.apply(x, self.scale, self.maxq, False).to(x_dtype)
+
             return AsymSTEQuantize.apply(x, self.scale, self.zero, self.maxq, False).to(
                 x_dtype
             )
