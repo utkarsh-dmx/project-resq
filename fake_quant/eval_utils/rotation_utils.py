@@ -62,6 +62,15 @@ def rotate_embeddings(model, R1: torch.Tensor) -> None:
         dtype = W.weight.data.dtype
         W_ = W.weight.data.to(device="cuda", dtype=torch.float64)
         W.weight.data = torch.matmul(W_, R1).to(device="cpu", dtype=dtype)
+    if hasattr(model, "visual"):
+        #for VLMs, also rotate the output of patch Merger layer
+        W = model.visual.merger.mlp[-1]
+        dtype = W.weight.data.dtype
+        W_ = W.weight.data.to(device="cuda", dtype=torch.float64)
+        W.weight.data = torch.matmul(R1.T, W_).to(device="cpu", dtype=dtype)
+        if W.bias is not None:
+            b = W.bias.data.to(device="cuda", dtype=torch.float64)
+            W.bias.data = torch.matmul(R1.T, b).to(device="cpu", dtype=dtype)
 
 
 def rotate_attention_inputs(layer, R1) -> None:

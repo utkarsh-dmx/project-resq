@@ -26,7 +26,9 @@ def evaluator(model, testenc, dev, args):
 
     layers = model.model.layers
     model.model.embed_tokens = model.model.embed_tokens.to(dev)
-    model.model.rotary_emb = model.model.rotary_emb.to(dev)
+    if hasattr(model.model, "rotary_emb"):
+        model.model.rotary_emb = model.model.rotary_emb.to(dev)
+
 
     layers[0] = layers[0].to(dev)
 
@@ -61,8 +63,10 @@ def evaluator(model, testenc, dev, args):
             cache["i"] += 1
             cache["attention_mask"] = kwargs["attention_mask"]
             cache["position_ids"] = kwargs["position_ids"]
-            cache["position_embeddings"] = kwargs["position_embeddings"]
-
+            if "position_embeddings" in kwargs:
+                cache["position_embeddings"] = kwargs["position_embeddings"]
+            else:
+                cache["position_embeddings"] = None
             raise ValueError
 
     layers[0] = Catcher(layers[0])
@@ -77,7 +81,8 @@ def evaluator(model, testenc, dev, args):
     layers[0] = layers[0].cpu()
 
     model.model.embed_tokens = model.model.embed_tokens.cpu()
-    model.model.rotary_emb = model.model.rotary_emb.cpu()
+    if hasattr(model.model, "rotary_emb"):
+        model.model.rotary_emb = model.model.rotary_emb.cpu()
     position_ids = cache["position_ids"]
 
     torch.cuda.empty_cache()

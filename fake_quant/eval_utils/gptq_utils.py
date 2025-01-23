@@ -95,7 +95,18 @@ class GPTQ:
         H[diag, diag] += damp
         H = torch.linalg.cholesky(H)
         H = torch.cholesky_inverse(H)
-        H = torch.linalg.cholesky(H, upper=True)
+        try:
+            H = torch.linalg.cholesky(H, upper=True)
+        except torch._C._LinAlgError as e:
+            print(f"An error occurred: {e}")
+            epsilon = 1e-5
+            H = H + epsilon * torch.eye(H.size(0), device=H.device)
+            try:
+                H = torch.linalg.cholesky(H, upper=True)
+                print("Cholesky decomposition succeeded after stabilization.")
+            except torch._C._LinAlgError as e:
+                print(f"Failed again after stabilization: {e}")
+            
         Hinv = H
         for i1 in range(0, self.columns, blocksize):
             i2 = min(i1 + blocksize, self.columns)
@@ -175,7 +186,8 @@ def gptq_fwrd(model, dataloader, dev, args):
 
     model.model.embed_tokens = model.model.embed_tokens.to(dev)
     model.model.norm = model.model.norm.to(dev)
-    model.model.rotary_emb = model.model.rotary_emb.to(dev)
+    if hasattr(model.model, "rotary_emb"):
+        model.model.rotary_emb = model.model.rotary_emb.to(dev)
     layers[0] = layers[0].to(dev)
 
     dtype = next(iter(model.parameters())).dtype
@@ -194,7 +206,10 @@ def gptq_fwrd(model, dataloader, dev, args):
             cache["i"] += 1
             cache["attention_mask"] = kwargs["attention_mask"]
             cache["position_ids"] = kwargs["position_ids"]
-            cache["position_embeddings"] = kwargs["position_embeddings"]
+            if "position_embeddings" in kwargs:
+                cache["position_embeddings"] = kwargs["position_embeddings"]
+            else:
+                cache["position_embeddings"] = None
             raise ValueError
 
     layers[0] = Catcher(layers[0])
@@ -208,7 +223,8 @@ def gptq_fwrd(model, dataloader, dev, args):
     layers[0] = layers[0].cpu()
     model.model.embed_tokens = model.model.embed_tokens.cpu()
     model.model.norm = model.model.norm.cpu()
-    model.model.rotary_emb = model.model.rotary_emb.cpu()
+    if hasattr(model.model, "rotary_emb"):
+        model.model.rotary_emb = model.model.rotary_emb.cpu()
     torch.cuda.empty_cache()
 
     outs = torch.zeros_like(inps)
@@ -330,6 +346,7 @@ def gptq_fwrd(model, dataloader, dev, args):
                 inps[j].unsqueeze(0),
                 attention_mask=attention_mask,
                 position_ids=position_ids,
+                position_embeddings=position_embeddings,
             )[0]
 
         layers[i] = layer.cpu()

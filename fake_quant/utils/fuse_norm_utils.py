@@ -40,6 +40,14 @@ def fuse_layer_norms(model):
     kwargs = {"model": model}
 
     # Embedding fusion
+    # if hasattr(model.language_model.model, "embed_tokens"): # for llama-vision
+    #     for W in [model.language_model.model.embed_tokens]:
+    #         W_ = W.weight.data.double()
+    #         W.weight.data = (W_ - W_.mean(dim=-1, keepdim=True)).to(W.weight.data.dtype)
+        
+    #     layers = [layer for layer in model.language_model.model.layers]
+
+    # else:
     for W in [model.model.embed_tokens]:
         W_ = W.weight.data.double()
         W.weight.data = (W_ - W_.mean(dim=-1, keepdim=True)).to(W.weight.data.dtype)
@@ -52,20 +60,30 @@ def fuse_layer_norms(model):
         fuse_ln_linear(
             layer.post_attention_layernorm, [layer.mlp.up_proj, layer.mlp.gate_proj]
         )
-        fuse_ln_linear(
-            layer.input_layernorm,
-            [
-                layer.self_attn.q_proj,
-                layer.self_attn.k_proj,
-                layer.self_attn.v_proj,
-            ],
-        )
+        if hasattr(layer, "self_attn"):
+            fuse_ln_linear(
+                layer.input_layernorm,
+                [
+                    layer.self_attn.q_proj,
+                    layer.self_attn.k_proj,
+                    layer.self_attn.v_proj,
+                ],
+            )
+        elif hasattr(layer, "cross_attn"):
+            fuse_ln_linear(
+                layer.input_layernorm,
+                [
+                    layer.cross_attn.q_proj,
+                ],
+            )
+
 
         W_norm = layer.post_attention_layernorm.weight.data
         layer.post_attention_layernorm.weight.data = torch.ones_like(W_norm)
         W_norm = layer.input_layernorm.weight.data
         layer.input_layernorm.weight.data = torch.ones_like(W_norm)
 
+        
     fuse_ln_linear(
         model.model.norm,
         [model.lm_head],

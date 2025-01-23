@@ -10,15 +10,15 @@ from logging import Logger
 
 import torch
 import torch.distributed as dist
-from transformers import LlamaTokenizerFast, AutoConfig
+from transformers import AutoConfig, AutoTokenizer, AutoProcessor
 
 from eval_utils.main import ptq_model
 from eval_utils.modeling_llama_2 import LlamaForCausalLM
+from eval_utils.modeling_qwen2 import Qwen2ForCausalLM
+from eval_utils.modeling_qwen2_vl import Qwen2VLForConditionalGeneration
 from utils import data_utils, eval_utils, utils
 from utils.process_args import process_args_ptq
-from utils.LMClass import LMClass
 from lm_eval import evaluator
-from utils.categories import subcategories, categories
 import numpy as np
 from lm_eval.utils import make_table
 from datasets import load_dataset
@@ -26,9 +26,11 @@ import json
 import os
 from tqdm import tqdm
 import random
-import time
-
 from utils.parallel_utils import map_layers_to_multi_gpus
+from lm_eval.models.huggingface import HFLM
+from lm_eval.models.hf_vlms import HFMultimodalLM
+
+
 
 from utils.metrics import (
     qa_f1_score,
@@ -67,7 +69,7 @@ dataset2metric = {
     "repobench-p": code_sim_score,
 }
 
-log: Logger = utils.get_logger("resq", "c4-llama-3.2-512.log")
+log: Logger = utils.get_logger("resq", "log.log")
 
 
 @torch.no_grad()
@@ -155,43 +157,60 @@ def get_pred(
 
 
 @torch.no_grad()
-def evaluate(lm, args):
-    use_cache = lm.model.config.use_cache
-    lm.model.config.use_cache = False
+def evaluate(model, tokenizer, args):
+    use_cache = model.config.use_cache
+    model.config.use_cache = False
+
+    results = {}
 
     testloader = data_utils.get_wikitext2(
         seed=args.seed,
         seqlen=2048,
-        tokenizer=lm.tokenizer,
+        tokenizer=tokenizer,
         eval_mode=True,
+        vision=args.vision_lm,
     )
-    dataset_ppl = eval_utils.evaluator(lm.model, testloader, utils.DEV, args)
-    log.info("wiki2 ppl is: {}".format(dataset_ppl))
-    lm.model.config.use_cache = use_cache
 
+    dataset_ppl = eval_utils.evaluator(model, testloader, utils.DEV, args)
+    log.info("wiki2 ppl is: {}".format(dataset_ppl))
+    model.config.use_cache = use_cache
+
+
+    if args.multigpu:
+        map_layers_to_multi_gpus(model.model.layers)
+        input_device = model.model.layers[0].device
+        output_device = model.model.layers[-1].device
+        assert input_device == output_device
+        model.model.embed_tokens.to(input_device)
+        if hasattr(model.model, "rotary_emb"):
+            model.model.rotary_emb = model.model.rotary_emb.to(input_device)
+        if hasattr(model, "visual"):
+            model.visual = model.visual.to(input_device)
+        model.model.norm.to(output_device)
+        model.lm_head.to(output_device)
+    else:
+        input_device = utils.DEV
+        model.to(utils.DEV)
     if args.tasks != "":
-        if args.multigpu:
-            map_layers_to_multi_gpus(lm.model.model.layers)
-            input_device = lm.model.model.layers[0].device
-            output_device = lm.model.model[-1].device
-            assert input_device == output_device
-            lm._device = input_device
-            lm.model.model.embed_tokens.to(input_device)
-            lm.model.model.rotary_emb.to(input_device)
-            lm.model.model.norm.to(output_device)
-            lm.model.lm_head.to(output_device)
+        if args.vision_lm:
+            lm = HFMultimodalLM(pretrained=model, processor=tokenizer)
         else:
-            lm.model.to(utils.DEV)
-        all_tasks = args.tasks.split(",")
-        for task in all_tasks:
-            t_results = evaluator.simple_evaluate(
-                lm,
-                tasks=task,
-                num_fewshot=args.num_fewshot,
-                limit=None if args.limit == -1 else args.limit,
-                batch_size="auto:4",
-            )
-            log.info(make_table(t_results))
+            lm = HFLM(pretrained=model, tokenizer=tokenizer)
+        lm._device = input_device
+        model_args={}
+        model_args['parallelize'] = True if args.multigpu else False
+        apply_chat_template = "mmmu" in args.tasks #Run MMMU separately because apply_chat_template is False for every other task.
+        t_results = evaluator.simple_evaluate(
+            lm,
+            tasks=args.tasks.split(","),
+            model_args=model_args,
+            num_fewshot=args.num_fewshot,
+            limit=None if args.limit == -1 else args.limit,
+            batch_size = args.bsz,
+            apply_chat_template=apply_chat_template,
+        )
+        results.update(t_results)
+        print(make_table(t_results))
 
     if args.long_bench_tasks != "":
         model2path = json.load(open("config_longbench/model2path.json", "r"))
@@ -199,44 +218,33 @@ def evaluate(lm, args):
         # we design specific prompt format and max generation length for each task, feel free to modify them to optimize model output
         dataset2prompt = json.load(open("config_longbench/dataset2prompt.json", "r"))
         dataset2maxlen = json.load(open("config_longbench/dataset2maxlen.json", "r"))
-        model = lm.model.to(utils.DEV)
-        tokenizer = lm.tokenizer
+        if args.tasks != "":
+            model = lm.model
+            tokenizer = lm.tokenizer
         model_name = args.model_name
         max_length = model2maxlen[model_name]
-
+        
         all_tasks = args.long_bench_tasks.split(",")
         # datasets = ["narrativeqa", "qasper", "multifieldqa_en", "multifieldqa_zh", "hotpotqa", "2wikimqa", "musique", \
-        # "dureader", "gov_report", "qmsum", "multi_news", "vcsum", "trec", "triviaqa", "samsum", "lsht", \
-        # "passage_count", "passage_retrieval_en", "passage_retrieval_zh", "lcc", "repobench-p"]
+            # "dureader", "gov_report", "qmsum", "multi_news", "vcsum", "trec", "triviaqa", "samsum", "lsht", \
+            # "passage_count", "passage_retrieval_en", "passage_retrieval_zh", "lcc", "repobench-p"]
         for dataset in all_tasks:
-            data = load_dataset("THUDM/LongBench", f"{dataset}", split="test")
-            if not os.path.exists(f"pred/{model_name}_{max_length}_{args.rotate_mode}"):
-                os.makedirs(f"pred/{model_name}_{max_length}_{args.rotate_mode}")
-            out_path = (
-                f"pred/{model_name}_{max_length}_{args.rotate_mode}/{dataset}.jsonl"
-            )
+            data = load_dataset('THUDM/LongBench', f"{dataset}", split='test')
+            if not os.path.exists(f"pred/{model_name}_{max_length}"):
+                os.makedirs(f"pred/{model_name}_{max_length}")
+            out_path = f"pred/{model_name}_{max_length}/{dataset}.jsonl"
 
             if os.path.exists(out_path):
                 continue
             prompt_format = dataset2prompt[dataset]
             max_gen = dataset2maxlen[dataset]
-            preds = get_pred(
-                model,
-                tokenizer,
-                data,
-                max_length,
-                max_gen,
-                prompt_format,
-                dataset,
-                utils.DEV,
-                model_name,
-            )
+            preds = get_pred(model, tokenizer, data, max_length, max_gen, prompt_format, dataset, utils.DEV, model_name)
             with open(out_path, "w", encoding="utf-8") as f:
                 for pred in preds:
                     json.dump(pred, f, ensure_ascii=False)
-                    f.write("\n")
-
-        path = f"pred/{model_name}_{max_length}_{args.rotate_mode}/"
+                    f.write('\n')
+            
+        path = f"pred/{model_name}_{max_length}/"
         all_files = os.listdir(path)
         scores = dict()
 
@@ -245,7 +253,7 @@ def evaluate(lm, args):
             if not filename.endswith("jsonl"):
                 continue
             predictions, answers, lengths = [], [], []
-            dataset = filename.split(".")[0]
+            dataset = filename.split('.')[0]
             with open(f"{path}{filename}", "r", encoding="utf-8") as f:
                 for line in f:
                     data = json.loads(line)
@@ -256,11 +264,11 @@ def evaluate(lm, args):
                         lengths.append(data["length"])
             score = scorer(dataset, predictions, answers, all_classes)
             scores[dataset] = score
-        out_path = f"pred/{model_name}_{max_length}_{args.rotate_mode}/result.json"
+        out_path = f"pred/{model_name}_{max_length}/result.json"
         with open(out_path, "w") as f:
             json.dump(scores, f, ensure_ascii=False, indent=4)
 
-    return
+    return results
 
 
 def seed_everything(seed):
@@ -281,43 +289,70 @@ def train() -> None:
     log.info("the rank is {}".format(local_rank))
     torch.distributed.barrier()
     seed_everything(ptq_args.seed)
-
     config = AutoConfig.from_pretrained(
         model_args.input_model,
     )
-    # Llama v3.2 specific: Spinquant is not compatiable with tie_word_embeddings, clone lm_head from embed_tokens
+    
+    if ptq_args.flash_attn:
+        config._attn_implementation = "flash_attention_2"
+    dtype = torch.bfloat16 if training_args.bf16 else torch.float16
+
+    # ResQ is not compatiable with tie_word_embeddings, clone lm_head from embed_tokens
     process_word_embeddings = False
     if config.tie_word_embeddings:
         config.tie_word_embeddings = False
         process_word_embeddings = True
-    if ptq_args.flash_attn:
-        config._attn_implementation = "flash_attention_2"
-    dtype = torch.bfloat16 if training_args.bf16 else torch.float16
-    model = LlamaForCausalLM.from_pretrained(
-        pretrained_model_name_or_path=model_args.input_model,
-        torch_dtype=dtype,
-        config=config,
-    )
+    vision = False
+    if "llama" in model_args.input_model.lower():
+        
+        model = LlamaForCausalLM.from_pretrained(
+            pretrained_model_name_or_path=model_args.input_model,
+            torch_dtype=dtype,
+            config=config,
+        )
+    elif "qwen2" in model_args.input_model.lower() and "vl" not in model_args.input_model.lower():
+        model = Qwen2ForCausalLM.from_pretrained(
+            pretrained_model_name_or_path=model_args.input_model,
+            torch_dtype=dtype,
+            config=config,
+        )
+    elif "qwen2" in model_args.input_model.lower() and "vl" in model_args.input_model.lower():
+        model = Qwen2VLForConditionalGeneration.from_pretrained(
+            pretrained_model_name_or_path=model_args.input_model,
+            torch_dtype=dtype,
+            config=config,
+        )
+        vision = True
     if process_word_embeddings:
         model.lm_head.weight.data = model.model.embed_tokens.weight.data.clone()
 
     for name, m in model.named_modules():
         if "basis_change" in name:
             m.weight.data.copy_(torch.eye(model.config.hidden_size))
-    start_time = time.time()
     model = ptq_model(ptq_args, model, model_args)
-    end_time = time.time()
-    log.info(str(end_time - start_time))
     print(model)
-    from lm_eval.models.huggingface import HFLM
+    model.seqlen = training_args.model_max_length
 
-    lm = HFLM(pretrained=model.to(utils.DEV))
+    if local_rank == 0:
+        log.info("Model PTQ completed {}".format(model))
+        log.info("Start to load tokenizer...")
+    if vision:
+        tokenizer = AutoProcessor.from_pretrained(model_args.input_model)
+    else:
+        tokenizer = AutoTokenizer.from_pretrained(
+            pretrained_model_name_or_path=model_args.input_model,
+            cache_dir=training_args.cache_dir,
+            model_max_length=training_args.model_max_length,
+            padding_side="right",
+            use_fast=True,
+            add_eos_token=False,
+            add_bos_token=False,
+        )
+    log.info("Complete tokenizer loading...")
 
-    lm.model.seqlen = training_args.model_max_length
-
-    ptq_args.model_name = model_args.input_model.split("/")[-1]
-    evaluate(lm, ptq_args)
-
+    ptq_args.vision_lm = vision
+    ptq_args.model_name = model_args.input_model.split('/')[-1]
+    results = evaluate(model, tokenizer, ptq_args)
     dist.barrier()
 
 

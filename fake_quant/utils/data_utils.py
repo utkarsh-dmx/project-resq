@@ -17,22 +17,25 @@ import transformers
 
 
 def get_wikitext2(
-    nsamples=128, seed=0, seqlen=2048, model="", tokenizer=None, eval_mode=False
+    nsamples=128, seed=0, seqlen=2048, model="", tokenizer=None, eval_mode=False, vision=False,
 ):
     if tokenizer is None:
-        tokenizer = transformers.AutoTokenizer.from_pretrained(model, use_fast=False)
+        if vision:
+            tokenizer = transformers.AutoProcessor.from_pretrained(model)
+        else:
+            tokenizer = transformers.AutoTokenizer.from_pretrained(model, use_fast=False)
 
     if eval_mode:
         testdata = datasets.load_dataset("Salesforce/wikitext", "wikitext-2-raw-v1")[
             "test"
         ]
-        testenc = tokenizer("\n\n".join(testdata["text"]), return_tensors="pt")
+        testenc = tokenizer(text="\n\n".join(testdata["text"]), return_tensors="pt")
         return testenc
     else:
         traindata = datasets.load_dataset("Salesforce/wikitext", "wikitext-2-raw-v1")[
             "train"
         ]
-        trainenc = tokenizer("\n\n".join(traindata["text"]), return_tensors="pt")
+        trainenc = tokenizer(text="\n\n".join(traindata["text"]), return_tensors="pt")
         random.seed(seed)
         trainloader = []
         for _ in range(nsamples):
@@ -46,12 +49,15 @@ def get_wikitext2(
 
 
 def get_c4(
-    nsamples=128, seed=0, seqlen=2048, model="", tokenizer=None, eval_mode=False
+    nsamples=128, seed=0, seqlen=2048, model="", tokenizer=None, eval_mode=False, vision=False,
 ):
     print("get_c4")
 
     if tokenizer is None:
-        tokenizer = transformers.AutoTokenizer.from_pretrained(model, use_fast=False)
+        if vision:
+            tokenizer = transformers.AutoProcessor.from_pretrained(model)
+        else:
+            tokenizer = transformers.AutoTokenizer.from_pretrained(model, use_fast=False)
 
     if eval_mode:
         valdata = datasets.load_dataset(
@@ -64,7 +70,7 @@ def get_c4(
         for _ in range(256):
             while True:
                 i = random.randint(0, len(valdata) - 1)
-                tmp = tokenizer(valdata[i]["text"], return_tensors="pt")
+                tmp = tokenizer(text=valdata[i]["text"], return_tensors="pt")
                 if tmp.input_ids.shape[1] > seqlen:
                     break
             i = random.randint(0, tmp.input_ids.shape[1] - seqlen - 1)
@@ -83,7 +89,7 @@ def get_c4(
         for _ in range(nsamples):
             while True:
                 i = random.randint(0, len(traindata) - 1)
-                trainenc = tokenizer(traindata[i]["text"], return_tensors="pt")
+                trainenc = tokenizer(text=traindata[i]["text"], return_tensors="pt")
                 if trainenc.input_ids.shape[1] > seqlen:
                     break
             i = random.randint(0, trainenc.input_ids.shape[1] - seqlen - 1)
@@ -103,11 +109,12 @@ def get_data(
     model="",
     tokenizer=None,
     eval_mode=False,
+    vision=False,
 ):
     if "wikitext" in calib_dataset:
-        return get_wikitext2(nsamples, seed, seqlen, model, tokenizer, eval_mode)
+        return get_wikitext2(nsamples, seed, seqlen, model, tokenizer, eval_mode, vision)
     elif "c4" in calib_dataset:
-        return get_c4(nsamples, seed, seqlen, model, tokenizer, eval_mode)
+        return get_c4(nsamples, seed, seqlen, model, tokenizer, eval_mode, vision)
     else:
         raise NotImplementedError
 

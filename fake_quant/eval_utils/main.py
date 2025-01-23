@@ -128,9 +128,14 @@ def ptq_model(args, model, model_args=None):
 
             if "lm_head" in name:  # Skip lm_head quantization
                 layer_input_bits = 16
+                residual_length = 0
 
             if "basis_change" in name:
                 layer_input_bits = 8  #####
+            
+            if "visual" in name: ###### Qwen-2-VL (vision part is not quantized)
+                layer_input_bits = 16
+                residual_length = 0
 
             if "down_proj" in name:  # Set the down_proj precision
                 residual_length = 0
@@ -150,7 +155,11 @@ def ptq_model(args, model, model_args=None):
         if args.k_pre_rope:
             raise NotImplementedError("Pre-RoPE quantization is not supported yet!")
         else:
-            rope_function_name = "apply_rotary_pos_emb"
+            if hasattr(model, "visual"):
+                rope_function_name = "apply_multimodal_rotary_pos_emb"
+            else:
+                rope_function_name = "apply_rotary_pos_emb"
+            
             layers = model.model.layers
             if args.rotate_mode == "resq" or args.rotate_mode == "quik":
                 U_cpk = torch.load(args.optimized_basis_path)

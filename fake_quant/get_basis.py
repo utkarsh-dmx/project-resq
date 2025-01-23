@@ -13,11 +13,14 @@ import datasets
 import torch
 import torch.distributed as dist
 from torch import nn
-from transformers import AutoTokenizer, AutoModelForCausalLM
+from transformers import AutoTokenizer, AutoModelForCausalLM, AutoProcessor, AutoModelForImageTextToText
 from utils.data_utils import get_data
 from train_utils.fsdp_trainer import FSDPTrainer
 from train_utils.main import prepare_model
-from transformers.models.llama.modeling_llama import repeat_kv, apply_rotary_pos_emb
+from transformers.models.llama.modeling_llama import apply_rotary_pos_emb as pos_emb_llama
+from transformers.models.mllama.modeling_mllama import apply_rotary_pos_emb as pos_emb_mllama
+from transformers.models.qwen2.modeling_qwen2 import apply_rotary_pos_emb as pos_emb_qwen
+from transformers.models.qwen2_vl.modeling_qwen2_vl import apply_multimodal_rotary_pos_emb as pos_emb_qwen2_vl
 from train_utils.optimizer import SGDG
 from utils.process_args import process_args_ptq
 from utils.utils import get_local_rank, get_logger, pt_fsdp_state_dict
@@ -281,34 +284,44 @@ def get_outlier_rotations(model_args, training_args, ptq_args) -> None:
 
 @torch.no_grad()
 def get_basis(model_args, training_args, ptq_args) -> None:
-
-    model = AutoModelForCausalLM.from_pretrained(
-        pretrained_model_name_or_path=model_args.input_model,
-        torch_dtype=torch.float32,
-    )
+    vision = False
+    if 'vl' in model_args.input_model.lower() or 'vision' in model_args.input_model.lower():
+        tokenizer = AutoProcessor.from_pretrained(model_args.input_model)
+        model = AutoModelForImageTextToText.from_pretrained(model_args.input_model, torch_dtype=torch.float32)
+        vision = True
+    else:
+        tokenizer = AutoTokenizer.from_pretrained(
+            pretrained_model_name_or_path=model_args.input_model,
+            cache_dir=training_args.cache_dir,
+            model_max_length=training_args.model_max_length,
+            padding_side="right",
+            use_fast=True,
+            add_eos_token=False,
+            add_bos_token=False,
+        )
+        model = AutoModelForCausalLM.from_pretrained(
+            pretrained_model_name_or_path=model_args.input_model,
+            torch_dtype=torch.float32,
+        )
     model.seqlen = training_args.model_max_length
     transformers.set_seed(ptq_args.seed)
     model.eval()
 
+    if hasattr(model, "language_model"): #for vision llama
+        llm = model.language_model
+    else:
+        llm = model
+
     # Fuse Norm
-    fuse_norm_utils.fuse_layer_norms(model)
+    fuse_norm_utils.fuse_layer_norms(llm)
 
     utils.cleanup_memory(verbos=True)
 
-    log.info("Model init completed for training {}".format(model))
-    log.info("Start to load tokenizer...")
-    tokenizer = AutoTokenizer.from_pretrained(
-        pretrained_model_name_or_path=model_args.input_model,
-        cache_dir=training_args.cache_dir,
-        model_max_length=training_args.model_max_length,
-        padding_side="right",
-        use_fast=True,
-        add_eos_token=False,
-        add_bos_token=False,
-    )
-    log.info("Complete tokenizer loading...")
-    model.config.use_cache = False
+    log.info("Model init completed {}".format(model))
+
+    llm.config.use_cache = False
     seqlen = model.seqlen
+
     train_data = data_utils.get_data(
         seed=ptq_args.seed,
         seqlen=seqlen,
@@ -316,19 +329,21 @@ def get_basis(model_args, training_args, ptq_args) -> None:
         eval_mode=False,
         nsamples=ptq_args.nsamples,
         calib_dataset=ptq_args.calib_dataset,
+        vision=vision,
     )
     nbatches = len(train_data)
-    layers = model.model.layers
-    model.model.embed_tokens = model.model.embed_tokens.to(utils.DEV)
-    if hasattr(model.model, "rotary_emb"):
-        model.model.rotary_emb = model.model.rotary_emb.to(utils.DEV)
+    layers = llm.model.layers
+    llm.model.embed_tokens = llm.model.embed_tokens.to(utils.DEV)
+    if hasattr(llm.model, "rotary_emb"):
+        llm.model.rotary_emb = llm.model.rotary_emb.to(utils.DEV)
 
     layers[0] = layers[0].to(utils.DEV)
 
-    dtype = next(iter(model.parameters())).dtype
+    dtype = next(iter(llm.parameters())).dtype
+
     # The input of the first decoder layer.
     inps = torch.zeros(
-        (nbatches, model.seqlen, model.config.hidden_size),
+        (nbatches, model.seqlen, llm.config.hidden_size),
         dtype=dtype,
         device=utils.DEV,
     )
@@ -347,6 +362,12 @@ def get_basis(model_args, training_args, ptq_args) -> None:
             cache["position_ids"] = kwargs["position_ids"]
             if "position_embeddings" in kwargs:
                 cache["position_embeddings"] = kwargs["position_embeddings"]
+            else:
+                cache["position_embeddings"] = None
+            cache["cross_attention_states"] = kwargs["cross_attention_states"] if "cross_attention_states" in kwargs.keys() else None
+            cache["cross_attention_mask"] = kwargs["cross_attention_mask"] if "cross_attention_mask" in kwargs.keys() else None
+            cache["full_text_row_masked_out_mask"] = kwargs["full_text_row_masked_out_mask"] if "full_text_row_masked_out_mask" in kwargs.keys() else None
+            cache["cache_position"] = kwargs["cache_position"] if "cache_position" in kwargs.keys() else None
             raise ValueError
 
     layers[0] = Catcher(layers[0])
@@ -359,9 +380,9 @@ def get_basis(model_args, training_args, ptq_args) -> None:
     layers[0] = layers[0].module
     layers[0] = layers[0].cpu()
 
-    model.model.embed_tokens = model.model.embed_tokens.cpu()
-    if hasattr(model.model, "rotary_emb"):
-        model.model.rotary_emb = model.model.rotary_emb.cpu()
+    llm.model.embed_tokens = llm.model.embed_tokens.cpu()
+    if hasattr(llm.model, "rotary_emb"):
+        llm.model.rotary_emb = llm.model.rotary_emb.cpu()
     position_ids = cache["position_ids"]
     position_embeddings = cache["position_embeddings"]
 
@@ -373,9 +394,10 @@ def get_basis(model_args, training_args, ptq_args) -> None:
     rotation_dict = {}
     attention_mask = cache["attention_mask"]
 
-    hidden_dim = model.config.hidden_size
-    head_dim = hidden_dim // model.config.num_attention_heads
-    kv_heads = model.config.num_key_value_heads
+    hidden_dim = llm.config.hidden_size
+    num_attention_heads = llm.config.num_attention_heads
+    head_dim = hidden_dim // num_attention_heads
+    kv_heads = llm.config.num_key_value_heads
     down_proj_blocksize = ptq_args.down_proj_blocksize
     nlayers = len(layers)
     residual_fraction = ptq_args.residual_fraction
@@ -388,25 +410,30 @@ def get_basis(model_args, training_args, ptq_args) -> None:
     sparse_length_hidden = int(sparse_fraction * hidden_dim)
     sparse_length_head = int(sparse_fraction * head_dim)
 
+    if '70b' in model_args.input_model.lower() or "72b" in model_args.input_model.lower() :
+        cov_device = 'cpu'
+    else:
+        cov_device = utils.DEV
+
     # initialize covariance matrices
-    H_attn = torch.zeros((len(layers), hidden_dim, hidden_dim), device=utils.DEV)
-    H_mlp = torch.zeros((len(layers), hidden_dim, hidden_dim), device=utils.DEV)
+    H_attn = torch.zeros((len(layers), hidden_dim, hidden_dim), device=cov_device)
+    H_mlp = torch.zeros((len(layers), hidden_dim, hidden_dim), device=cov_device)
     H_down_proj = torch.zeros(
         (
             nlayers,
             down_proj_blocksize,
             down_proj_blocksize,
         ),
-        device=utils.DEV,
+        device=cov_device,
     )  # block down_proj with certain dimension
     H_value = torch.zeros(
         (
             nlayers,
-            model.config.num_key_value_heads,
+            llm.config.num_key_value_heads,
             head_dim,
             head_dim,
         ),
-        device=utils.DEV,
+        device=cov_device,
     )
     H_key_pos = torch.zeros(
         (
@@ -415,7 +442,7 @@ def get_basis(model_args, training_args, ptq_args) -> None:
             head_dim,
             head_dim,
         ),
-        device=utils.DEV,
+        device=cov_device,
     )
     R1_1 = random_orthogonal_matrix(
         hidden_dim - residual_length_hidden - sparse_length_hidden, "cuda"
@@ -513,39 +540,60 @@ def get_basis(model_args, training_args, ptq_args) -> None:
 
             hooks.append(layer.mlp.up_proj.register_forward_hook(hook_fn_upproj))
             hooks.append(layer.mlp.down_proj.register_forward_hook(hook_fn_downproj))
-            hooks.append(layer.self_attn.v_proj.register_forward_hook(hook_fn_vproj))
-            hooks.append(layer.self_attn.k_proj.register_forward_hook(hook_fn_kproj))
-            hooks.append(layer.self_attn.q_proj.register_forward_hook(hook_fn_qproj))
+            if hasattr(layer, "self_attn"):
+                hooks.append(layer.self_attn.v_proj.register_forward_hook(hook_fn_vproj))
+                hooks.append(layer.self_attn.k_proj.register_forward_hook(hook_fn_kproj))
+                hooks.append(layer.self_attn.q_proj.register_forward_hook(hook_fn_qproj))
+            elif hasattr(layer, "cross_attn"):
+                hooks.append(layer.cross_attn.v_proj.register_forward_hook(hook_fn_vproj))
+                hooks.append(layer.cross_attn.k_proj.register_forward_hook(hook_fn_kproj))
+                hooks.append(layer.cross_attn.q_proj.register_forward_hook(hook_fn_qproj))
 
             for j in range(nbatches):
                 with torch.no_grad():
                     # register forward hook for getting inputs to MLP
 
                     # 1 sample at a time
-                    outs[j] = layer(
-                        inps[j],
-                        attention_mask=attention_mask,
-                        position_ids=position_ids,
-                        position_embeddings=position_embeddings,
-                    )[0]
-
+                    if hasattr(layer, "cross_attn"):
+                        outs[j] = layer(
+                            inps[j],
+                            attention_mask=attention_mask,
+                            position_ids=position_ids,
+                            position_embeddings=position_embeddings,
+                            cross_attention_states = cache["cross_attention_states"],
+                            cross_attention_mask = cache["cross_attention_mask"],
+                            full_text_row_masked_out_mask = cache["full_text_row_masked_out_mask"],
+                            cache_position = cache["cache_position"],
+                        )[0]
+                    else:
+                        outs[j] = layer(
+                            inps[j],
+                            attention_mask=attention_mask,
+                            position_ids=position_ids,
+                            position_embeddings=position_embeddings,
+                        )[0]
+                    
                     # reshape to get value states per head
                     value_states = output_vproj.view(
                         1,
                         seqlen,
-                        layer.self_attn.num_key_value_heads,
-                        layer.self_attn.head_dim,
+                        kv_heads,
+                        head_dim,
                     ).transpose(1, 2)
-
                     # rope cos, sin
-                    cos, sin = layer.self_attn.rotary_emb(value_states, position_ids)
-
+                    if position_embeddings is not None:
+                        cos, sin = position_embeddings
+                    else:
+                        if "llama" in model_args.input_model.lower():
+                            cos, sin = layer.self_attn.rotary_emb(value_states, position_ids)
+                        elif "qwen" in model_args.input_model.lower():
+                            cos, sin = layer.self_attn.rotary_emb(value_states, seqlen)
                     # reshape to get key states per head
                     key_states = output_kproj.view(
                         1,
                         seqlen,
-                        layer.self_attn.num_key_value_heads,
-                        layer.self_attn.head_dim,
+                        kv_heads,
+                        head_dim,
                     ).transpose(1, 2)
                     # key_states = repeat_kv(key_states, layer.self_attn.num_key_value_groups)
 
@@ -553,30 +601,48 @@ def get_basis(model_args, training_args, ptq_args) -> None:
                     query_states = output_qproj.view(
                         1,
                         seqlen,
-                        layer.self_attn.num_heads,
-                        layer.self_attn.head_dim,
+                        num_attention_heads,
+                        head_dim,
                     ).transpose(1, 2)
 
                     # apply rotary embedding
-                    query_states_pos, key_states_pos = apply_rotary_pos_emb(
-                        query_states, key_states, cos, sin
-                    )
-
+                    if hasattr(layer, "self_attn"):
+                        if "llama" in model_args.input_model.lower() and "vision" not in model_args.input_model.lower():
+                            query_states_pos, key_states_pos = pos_emb_llama(
+                                query_states, key_states, cos, sin
+                            )
+                        elif "llama" in model_args.input_model.lower() and "vision" in model_args.input_model.lower():
+                            query_states_pos, key_states_pos = pos_emb_mllama(
+                                query_states, key_states, cos, sin
+                            )
+                        elif "qwen" in model_args.input_model.lower() and "vl" not in model_args.input_model.lower():
+                            query_states_pos, key_states_pos = pos_emb_qwen(
+                                query_states, key_states, cos, sin, position_ids
+                            )
+                        elif "qwen" in model_args.input_model.lower() and "vl" in model_args.input_model.lower():
+                            query_states_pos, key_states_pos = pos_emb_qwen2_vl(
+                                query_states, key_states, cos, sin, layer.self_attn.rope_scaling["mrope_section"]
+                            )
+                    else:
+                        #cross attn does not have rotary embedding
+                        key_states_pos = key_states.clone()
+                        query_states_pos = query_states.clone()
+                    
                     # calculate covariance
                     H_mlp[i] += torch.sum(
                         input_up_proj.double().mT @ input_up_proj.double(), dim=0
-                    )  # shape : [hidden_dim, hidden_dim]
+                    ).to(cov_device)  # shape : [hidden_dim, hidden_dim]
 
                     H_attn[i] += torch.sum(
                         input_qkv_proj.double().mT @ input_qkv_proj.double(), dim=0
-                    )  # shape : [hidden_dim, hidden_dim]
+                    ).to(cov_device)  # shape : [hidden_dim, hidden_dim]
                     H_value[i] += torch.sum(
                         value_states.double().mT @ value_states.double(), dim=0
-                    )  # shape : [num_heads, head_dim, head_dim]
+                    ).to(cov_device)  # shape : [num_heads, head_dim, head_dim]
 
                     H_key_pos[i] += torch.sum(
                         key_states_pos.double().mT @ key_states_pos.double(), dim=(0)
-                    )  # shape : [num_kv_heads, head_dim, head_dim]
+                    ).to(cov_device)  # shape : [num_kv_heads, head_dim, head_dim]
 
                     H_down_proj[i] += torch.sum(
                         input_down_proj.view(
@@ -588,7 +654,7 @@ def get_basis(model_args, training_args, ptq_args) -> None:
                             input_down_proj.shape[0], -1, ptq_args.down_proj_blocksize
                         ).double(),
                         dim=(0),
-                    )  # shape : [1024, 1024]
+                    ).to(cov_device)  # shape : [1024, 1024]
             for hook in hooks:
                 hook.remove()
 
@@ -671,7 +737,7 @@ def get_basis(model_args, training_args, ptq_args) -> None:
                 )
                 # eigen decomposition of value states
                 eval_value, evec_value = perform_eigen_decomp(
-                    H_value[i] / (seqlen * nbatches), per_head=True, num_heads=kv_heads
+                    (H_value[i] / (seqlen * nbatches)), per_head=True, num_heads=kv_heads
                 )
                 # eigen decomposition of key states after rope embedding
                 eval_k_pos, evec_k_pos = perform_eigen_decomp(
@@ -767,6 +833,7 @@ def get_basis(model_args, training_args, ptq_args) -> None:
 def perform_eigen_decomp(Cov_matrix, per_head=False, num_heads=0):
     # performs eigen decomposition and returns
     # the sorted eigen values and eigen vectors
+    Cov_matrix = Cov_matrix.to(utils.DEV)
     if per_head:
         assert num_heads != 0  # cannot use per head and not pass num_heads
         eval = []
