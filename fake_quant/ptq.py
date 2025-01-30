@@ -199,6 +199,12 @@ def evaluate(model, tokenizer, args):
         lm._device = input_device
         model_args={}
         model_args['parallelize'] = True if args.multigpu else False
+        
+        # hack for setting trust remote code = True taken from https://github.com/EleutherAI/lm-evaluation-harness/blob/main/lm_eval/__main__.py:377
+        model_args['trust_remote_code'] = True
+        import datasets
+        datasets.config.HF_DATASETS_TRUST_REMOTE_CODE = True
+
         apply_chat_template = "mmmu" in args.tasks #Run MMMU separately because apply_chat_template is False for every other task.
         t_results = evaluator.simple_evaluate(
             lm,
@@ -323,6 +329,7 @@ def train() -> None:
             config=config,
         )
         vision = True
+
     if process_word_embeddings:
         model.lm_head.weight.data = model.model.embed_tokens.weight.data.clone()
 

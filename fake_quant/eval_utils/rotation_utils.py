@@ -386,14 +386,10 @@ def fuse_basis_shared(model, args):
     )  # checking if rotation dimensions align with residual length
     head_dim = model_dim // num_heads
     U_cpk = torch.load(args.optimized_basis_path)
-    # e_cpk = torch.load(args.optimized_basis_path.replace("U", "E"))
-    # e_mlp_attn = e_cpk["attn_mlp"].cuda()
-    # scale = torch.diag(1 / (e_mlp_attn).sqrt()).pow(0.5)
 
     U_attn = U_cpk["attn_mlp"].cuda()
-    # U_attn = torch.matmul(U_attn, scale)
     U_attn = torch.matmul(U_attn, R1)
-    # breakpoint()
+
     torch.distributed.barrier()
     rotate_embeddings(model, U_attn)
     rotate_head(model, torch.inverse(U_attn).t())
@@ -407,6 +403,7 @@ def fuse_basis_shared(model, args):
 
         key = f"layer.{idx}.self_attn.value"
         U_value = torch.matmul(U_cpk[key].cuda(), R2)
+
         rotate_ov_proj(layers[idx], num_heads, head_dim, R2=U_value, per_head=True)
 
         rotate_attention_output(layers[idx], U_attn)

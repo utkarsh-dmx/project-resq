@@ -36,6 +36,7 @@ import matplotlib.pyplot as plt
 from matplotlib.ticker import FormatStrFormatter
 import matplotlib.font_manager as fm
 import seaborn as sns
+import matplotlib.lines as mlines  # For custom legend handles
 
 log: Logger = utils.get_logger("resq", "collect_act.log")
 
@@ -119,6 +120,95 @@ def plot_layer_benchmark():
     # Show plot
     plt.tight_layout()
     plt.savefig("layer_benchmark.png", dpi=600)
+    plt.clf()
+
+@torch.no_grad()
+def plot_e2e_decoder_benchmark():
+
+    # Set Seaborn style
+    sns.set(style="whitegrid")
+
+    categories = [
+        "Llama-3.2-3B",
+        "Meta-Llama-3-8B",
+        "Qwen2.5-32B",
+        "Meta-Llama-3-70B",
+        "Qwen-2.5-72B",
+    ]
+
+    resq_benchmark_8192 = [1.61, 1.95, 2.36, 2.76, 2.66]
+    resq_benchmark_512 = [1.95, 2.14, 2.42, 3.03, 2.95]
+
+    int4_benchmark_8192 = [1.76, 2.21, 2.77, 3.21, 3.23]
+    int4_benchmark_512 = [2.1, 2.53, 2.95, 3.67, 3.7]
+
+    int8_benchmark_8192 = [1.52, 1.79, 2.09, 2.31, 2.34]
+    int8_benchmark_512 = [1.79, 1.93, 2.15, 2.5, 2.53]
+
+    x = np.arange(len(categories))
+    width = 0.4
+
+    # Plotting
+    fig, ax = plt.subplots(figsize=(10, 5))
+
+    bars1 = ax.bar(
+        x - width / 2,
+        resq_benchmark_512,
+        width,
+        label="seq_len : 512",
+        color="#5B88D3",
+        edgecolor="black",
+    )
+    bars2 = ax.bar(
+        x + width / 2,
+        resq_benchmark_8192,
+        width,
+        label="seq_len : 8192",
+        color="#55a868",
+        edgecolor="black",
+    )
+
+    scatter_x_512 = np.arange(len(categories)) - 0.2
+    scatter_x_8192 = np.arange(len(categories)) + 0.2
+
+    ax.scatter(scatter_x_512, int4_benchmark_512, color = "#5B88D3", s=100, marker='D', edgecolors="black")
+    ax.scatter(scatter_x_8192, int4_benchmark_8192, color = "#55a868", s=100, marker='D', edgecolors="black")
+    scatter_legend = mlines.Line2D([], [], linestyle='None', marker='D', markersize=10, color='white', markeredgecolor='black', markeredgewidth=1, label='INT4 Speedup')  # Only marker, no fill
+    # ax.scatter(scatter_x, int8_benchmark_512, color = "red", s=100, marker='D')
+
+    # Adding data labels for each bar
+    def add_labels(bars):
+        for bar in bars:
+            height = bar.get_height()
+            ax.annotate(
+                f"{height}x",
+                xy=(bar.get_x() + bar.get_width() / 2, height-0.3),
+                xytext=(0, 5),
+                textcoords="offset points",
+                ha="center",
+                va="bottom",
+                fontsize=14,
+                fontweight="bold",
+            )
+
+    add_labels(bars1)
+    add_labels(bars2)
+
+    # Labels and Titles
+    # ax.set_xlabel("Layer dimensions", fontsize=18, fontweight="bold")
+    ax.set_ylabel("Speedup", fontsize=18, fontweight="bold")
+    ax.set_xticks(x)
+    ax.set_xticklabels(categories, fontsize=14)
+    ax.legend(handles = [bars1, bars2, scatter_legend], fontsize=14)
+
+    # Grid and Aesthetics
+    ax.yaxis.grid(True, linestyle="--", alpha=0.7)
+    # ax.spines["top"].set_visible(False)
+    # ax.spines["right"].set_visible(False)
+
+    # Show plot
+    plt.tight_layout()
+    plt.savefig("decoder_benchmark.png", dpi=600)
     plt.clf()
 
 
@@ -236,6 +326,35 @@ def plot_samples_ablation():
     # Save and show plot
     plt.tight_layout()
     plt.savefig("nsamples_ablation.png", dpi=600)
+    plt.clf()
+
+
+@torch.no_grad()
+def plot_layer_activations_small(act, save_file_name):
+    # X = act.transpose(0, 1).abs().detach().numpy()
+    if len(act.shape) == 3:
+        # take the first batch
+        act = act[0]
+
+    act = act.float().detach().numpy()
+    max = np.abs(act).max() + 2
+
+    hidden_dim = act.shape[-1]
+
+    fig = plt.figure(figsize=[2.5, 2.5])
+    ax = fig.add_subplot(111)
+
+    x = np.arange(hidden_dim)
+
+    act_100 = act.max(axis=0)
+    act_0 = act.min(axis=0)
+    ax.set_ylim(-max, max)
+    ax.fill_between(x, act_0, act_100, alpha=1.0, color="#38a4c8", label="min/max")
+    
+    # ax.set_xlabel("Channel", labelpad=0)
+    # ax.set_ylabel("Activation Value", labelpad=0)
+
+    plt.savefig(save_file_name + "_1.png", dpi=600)
     plt.clf()
 
 
@@ -764,7 +883,8 @@ def collect_act():
         )
         os.makedirs(os.path.dirname(save_path_image), exist_ok=True)
         acts = captured_io["input"]["k_proj"]
-        plot_layer_activations(acts, save_path_image)
+        # plot_layer_activations(acts, save_path_image)
+        plot_layer_activations_small(acts, save_path_image)
 
         save_path_image = os.path.join(
             ptq_args.output_dir,
@@ -776,8 +896,9 @@ def collect_act():
         os.makedirs(os.path.dirname(save_path_image), exist_ok=True)
 
         acts = captured_io["input"]["gate_proj"]
-        plot_layer_activations(acts, save_path_image)
-        os.remove(save_path)
+        # plot_layer_activations(acts, save_path_image)
+        plot_layer_activations_small(acts, save_path_image)
+        # os.remove(save_path)
 
     if ptq_args.layerwise_mse:
         with torch.no_grad():
@@ -820,7 +941,8 @@ def collect_act():
 
 
 if __name__ == "__main__":
-    collect_act()
+    # collect_act()
     # plot_rank_ablation()
     # plot_samples_ablation()
     # plot_layer_benchmark()
+    plot_e2e_decoder_benchmark()

@@ -6,7 +6,7 @@
 # LICENSE file in the root directory of this source tree.
 
 python get_basis.py \
---input_model Qwen/Qwen2.5-72B \
+--input_model meta-llama/Llama-3.2-3B \
 --output_rotation_path "rotation" \
 --model_max_length 2048 \
 --down_proj_blocksize 256 \
