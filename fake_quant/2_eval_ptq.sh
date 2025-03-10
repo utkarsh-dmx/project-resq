@@ -7,8 +7,8 @@
 
 ### k_groupsize, v_groupsize = 64 only for Llama-3.2-1B else 128
 #### Storing config for 70B model
-torchrun --nnodes=1 --nproc_per_node=1 --master_port=24551 ptq.py \
---input_model meta-llama/Llama-3.2-3B \
+torchrun --nnodes=1 --nproc_per_node=1 --master_port=24543 ptq.py \
+--input_model Qwen/Qwen2.5-1.5B \
 --do_train False \
 --do_eval True \
 --per_device_eval_batch_size 1 \
@@ -19,17 +19,19 @@ torchrun --nnodes=1 --nproc_per_node=1 --master_port=24551 ptq.py \
 --a_bits 4 \
 --k_bits 4 \
 --v_bits 4 \
+--high_bits 6 \
+--low_bits 2 \
 --w_clip \
 --a_asym \
 --k_asym \
 --v_asym \
 --k_groupsize 128 \
 --v_groupsize 128 \
---residual_fraction 0.125 \
+--high_fraction 0.0625 \
+--low_fraction 0.0625 \
 --rotate_mode "resq" \
---optimized_rotation_path ./rotation/R-high_prec-0.125-sparse-0.0-Llama-3.2-3B.bin \
---optimized_basis_path ./rotation/U-wikitext-512-Llama-3.2-3B.bin \
+--optimized_rotation_path ./rotation/R-high-0.0625-low-0.0625-sparse-0.0-Qwen2.5-1.5B.bin \
+--optimized_basis_path ./rotation/U-wikitext-512-Qwen2.5-1.5B.bin \
 --rotation_granularity 'full_shared' \
 --rotate \
---flash_attn \
---tasks "mmlu" \
+--tasks "mmlu,boolq,piqa,social_iqa,hellaswag,winogrande,arc_easy,arc_challenge,openbookqa" \

@@ -123,20 +123,32 @@ class ActQuantizer(torch.nn.Module):
         self.register_buffer("maxq", torch.tensor(0))
         self.register_buffer("scale", torch.zeros(1))
         self.register_buffer("zero", torch.zeros(1))
-        # for residuals
-        self.register_buffer("maxq_r", torch.tensor(0))
-        self.register_buffer("scale_r", torch.zeros(1))
-        self.register_buffer("zero_r", torch.zeros(1))
+        
+        # for high prec
+        self.register_buffer("maxq_h", torch.tensor(0))
+        self.register_buffer("scale_h", torch.zeros(1))
+        self.register_buffer("zero_h", torch.zeros(1))
+        
+        # for low prec
+        self.register_buffer("maxq_l", torch.tensor(0))
+        self.register_buffer("scale_l", torch.zeros(1))
+        self.register_buffer("zero_l", torch.zeros(1))
 
         self.bits = 16
-        self.residual_length = 0
-        self.residual_bits = 16
+        self.high_bits = 16
+        self.low_bits = 16
+
+        self.high_bits_length = 0
+        self.low_bits_length = 0
+        
 
     def free(self) -> None:
         self.zero = None
         self.scale = None
-        self.zero_r = None
-        self.scale_r = None
+        self.zero_h = None
+        self.scale_h = None
+        self.zero_l = None
+        self.scale_l = None
 
     def forward(self, x):
         x_dtype = x.dtype
@@ -148,22 +160,31 @@ class ActQuantizer(torch.nn.Module):
             x = x.reshape(
                 x.shape[0], x.shape[1], x.shape[2] // self.groupsize, self.groupsize
             )
-        residual_dim = x.shape[-1] - self.residual_length
-        x_lp = x[..., :residual_dim]
-        x_hp = x[..., residual_dim:]
+
+        low_dim, high_dim = self.low_bits_length, x.shape[-1] - self.high_bits_length
+        x_l, x_m, x_h = x[..., :low_dim], x[..., low_dim:high_dim], x[..., high_dim:]
 
         if self.sym:
-            x = STEQuantize.apply(x_lp, self.scale, self.maxq)
-            if self.residual_length != 0:
-                x_hp = STEQuantize.apply(x_hp, self.scale_r, self.maxq_r)
-                x = torch.cat([x, x_hp], dim=-1).to(x_dtype)
+            x = STEQuantize.apply(x_m, self.scale, self.maxq)
+
+            if self.high_bits_length != 0:
+                x_h = STEQuantize.apply(x_h, self.scale_h, self.maxq_h)
+                x = torch.cat([x, x_h], dim=-1).to(x_dtype)
+
+            if self.low_bits_length != 0:
+                x_l = STEQuantize.apply(x_l, self.scale_l, self.maxq_l)
+                x = torch.cat([x_l, x], dim=-1).to(x_dtype)
+
         else:
-            x = AsymSTEQuantize.apply(x_lp, self.scale, self.zero, self.maxq)
-            if self.residual_length != 0:
-                x_hp = AsymSTEQuantize.apply(
-                    x_hp, self.scale_r, self.zero_r, self.maxq_r
-                )
-                x = torch.cat([x, x_hp], dim=-1).to(x_dtype)
+            x = AsymSTEQuantize.apply(x_m, self.scale, self.zero, self.maxq)
+
+            if self.high_bits_length != 0:
+                x_h = AsymSTEQuantize.apply(x_h, self.scale_h, self.zero_h, self.maxq_h)
+                x = torch.cat([x, x_h], dim=-1).to(x_dtype)
+
+            if self.low_bits_length != 0:
+                x_l = AsymSTEQuantize.apply(x_l, self.scale_l, self.zero_l, self.maxq_l)
+                x = torch.cat([x_l, x], dim=-1).to(x_dtype)
 
         if self.groupsize > 0:
             x = x.reshape(init_shape)
@@ -171,18 +192,24 @@ class ActQuantizer(torch.nn.Module):
         return x
 
     # Different from `forward`, this method returns quantized integers, scales (and zeros if asymmetric).
-    def quantize(self, x, return_residual=False):
-        residual_dim = x.shape[-1] - self.residual_length
-        x_lp = x[..., :residual_dim]
-        x_hp = x[..., residual_dim:]
+    def quantize(self, x, return_low=False, return_high=False):
+        low_dim, high_dim = self.low_bits_length, x.shape[-1] - self.high_bits_length
+        x_l, x_m, x_h = x[..., :low_dim], x[..., low_dim:high_dim], x[..., high_dim:]
+
         if self.sym:
-            if not return_residual:
-                return sym_quant(x_lp, self.scale, self.maxq)
-            return sym_quant(x_hp, self.scale_r, self.maxq_r)
+            if return_low:
+                return sym_quant(x_l, self.scale_l, self.maxq_l)
+            elif return_high:
+                return sym_quant(x_h, self.scale_h, self.maxq_h)
+            else:
+                return sym_quant(x_m, self.scale, self.maxq)
         else:
-            if not return_residual:
-                return asym_quant(x_lp, self.scale, self.zero, self.maxq)
-            return asym_quant(x_hp, self.scale_r, self.zero_r, self.maxq_r)
+            if return_low:
+                return asym_quant(x_l, self.scale_l, self.zero_l, self.maxq_l)
+            elif return_high:
+                return asym_quant(x_h, self.scale_h, self.zero_h, self.maxq_h)
+            else:
+                return asym_quant(x_m, self.scale, self.zero, self.maxq)
 
     def configure(
         self,
@@ -191,8 +218,10 @@ class ActQuantizer(torch.nn.Module):
         sym: bool = False,
         clip_ratio: float = 1.0,
         stoch: bool = False,
-        residual_length: int = 0,
-        residual_bits: int = 16,
+        high_bits_length: int = 0,
+        high_bits: int = 16,
+        low_bits_length: int = 0,
+        low_bits: int = 16,
     ) -> None:
         _, self.maxq = get_minq_maxq(bits, sym)
         self.bits = bits
@@ -200,22 +229,20 @@ class ActQuantizer(torch.nn.Module):
         self.sym = sym
         self.clip_ratio = clip_ratio
         self.stoch = stoch
-        self.residual_length = residual_length
-        self.residual_bits = residual_bits
-        _, self.maxq_r = get_minq_maxq(residual_bits, sym)
+        
+        self.high_bits_length = high_bits_length
+        self.high_bits = high_bits
+        _, self.maxq_h = get_minq_maxq(high_bits, sym)
+
+        self.low_bits_length = low_bits_length
+        self.low_bits = low_bits
+        _, self.maxq_l = get_minq_maxq(low_bits, sym)
 
         assert (
             self.clip_ratio <= 1 and self.clip_ratio > 0
         ), "Clip ratio should be in (0, 1]"
 
-    def find_params_per_token_groupwise(self, x, residual=False):
-        # init_shape = x.shape
-        # reshaped_x = x.reshape(
-        #     -1, x.shape[-2], x.shape[-1] // self.groupsize, self.groupsize
-        # )
-        maxq = self.maxq if not residual else self.maxq_r
-        # xmax = torch.amax(reshaped_x, dim=3, keepdim=True) * self.clip_ratio
-        # xmin = torch.amin(reshaped_x, dim=3, keepdim=True) * self.clip_ratio
+    def find_params_per_token_groupwise(self, x, maxq):
         xmax = torch.amax(x, dim=3, keepdim=True) * self.clip_ratio
         xmin = torch.amin(x, dim=3, keepdim=True) * self.clip_ratio
         if self.sym:
@@ -231,9 +258,6 @@ class ActQuantizer(torch.nn.Module):
             scale = (xmax - xmin) / maxq
             zero = torch.round(-xmin / scale)
 
-        # scale = scale.repeat(1, 1, 1, self.groupsize).reshape(init_shape)
-        # zero = zero.repeat(1, 1, 1, self.groupsize).reshape(init_shape)
-
         return scale, zero
 
     def find_params(self, x, residual_dim=-1) -> None:
@@ -243,31 +267,37 @@ class ActQuantizer(torch.nn.Module):
             x_reshaped = x.reshape(
                 x.shape[0], x.shape[1], x.shape[2] // self.groupsize, self.groupsize
             )
-            residual_dim = x_reshaped.shape[-1] - self.residual_length
-            x_lp = x_reshaped[..., :residual_dim]
-            x_hp = x_reshaped[..., residual_dim:]
-            self.scale, self.zero = self.find_params_per_token_groupwise(x_lp, False)
-            if self.residual_length != 0:
-                self.scale_r, self.zero_r = self.find_params_per_token_groupwise(
-                    x_hp, True
-                )
+            low_dim, high_dim = self.low_bits_length, x_reshaped.shape[-1] - self.high_bits_length
+            x_l, x_m, x_h = x_reshaped[..., :low_dim], x_reshaped[..., low_dim:high_dim], x_reshaped[..., high_dim:]
+            
+            self.scale, self.zero = self.find_params_per_token_groupwise(x_m, self.maxq)
+
+            if self.high_bits_length != 0:
+                self.scale_h, self.zero_h = self.find_params_per_token_groupwise(x_h, self.maxq_h)
+
+            if self.low_bits_length != 0:
+                self.scale_l, self.zero_l = self.find_params_per_token_groupwise(x_l, self.maxq_l)
 
             return
-        residual_dim = x.shape[-1] - self.residual_length
-        x_lp = x[..., :residual_dim]
-        x_hp = x[..., residual_dim:]
+        
+        low_dim, high_dim = self.low_bits_length, x.shape[-1] - self.high_bits_length
+        x_l, x_m, x_h = x[..., :low_dim], x[..., low_dim:high_dim], x[..., high_dim:]
 
-        self.scale, self.zero = self._find_params(x_lp, False)
-        if self.residual_length != 0:
-            self.scale_r, self.zero_r = self._find_params(x_hp, True)
+        self.scale, self.zero = self._find_params(x_m, self.maxq)
+        
+        if self.high_bits_length != 0:
+            self.scale_h, self.zero_h = self._find_params(x_h, self.maxq_h)
+        
+        if self.low_bits_length != 0:
+            self.scale_l, self.zero_l = self._find_params(x_l, self.maxq_l)
+
         return
 
-    def _find_params(self, x, residual=False):
+    def _find_params(self, x, maxq):
         if self.bits == 16:
             return
 
         dev = x.device
-        maxq = self.maxq_r if residual else self.maxq
 
         init_shape = x.shape
 
@@ -329,7 +359,7 @@ class ActQuantWrapper(torch.nn.Module):
         self.no_had = False
 
     def extra_repr(self) -> str:
-        str_ = f"Input Quantizer Bits: {self.quantizer.bits}, Residual Length: {self.quantizer.residual_length}"
+        str_ = f"Input Quantizer Bits: {self.quantizer.bits}, High Bits/Dim: {self.quantizer.high_bits}/{self.quantizer.high_bits_length}, Low Bits/Dim: {self.quantizer.low_bits}/{self.quantizer.low_bits_length}"
         if self.quantizer.bits < 16:
             str_ += (
                 f" (Asymmetric Per-Token)"
@@ -337,7 +367,7 @@ class ActQuantWrapper(torch.nn.Module):
                 else f" (Symmetric Per-Token)"
             )
 
-        str_ += f"\nOutput Quantizer Bits: {self.out_quantizer.bits}, Residual Length: {self.out_quantizer.residual_length}"
+        str_ += f"\nOutput Quantizer Bits: {self.out_quantizer.bits}, High Bits/Dim: {self.out_quantizer.high_bits}/{self.out_quantizer.high_bits_length}, Low Bits/Dim: {self.out_quantizer.low_bits}/{self.out_quantizer.low_bits_length}"
         if self.out_quantizer.bits < 16:
             str_ += (
                 f" (Asymmetric Per-Token)"

@@ -81,3 +81,15 @@ def capture_layer_io(layer, layer_input, attn_mask, pos_ids, pos_emb):
         h.remove()
 
     return {"input": captured_inputs, "output": captured_outputs}
+
+
+def replace_single_mod_opt(module, name, layer_to_replace, org_layer_type):
+    for attr in dir(module):
+        tmp = getattr(module, attr)
+        if type(tmp) == org_layer_type:
+            if attr in name:
+                print(name)
+                setattr(module, attr, layer_to_replace)
+
+    for name1, child in module.named_children():
+        replace_single_mod_opt(child, name + '.' + name1 if name != '' else name1, layer_to_replace, org_layer_type)

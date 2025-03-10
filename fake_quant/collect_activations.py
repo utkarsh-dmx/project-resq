@@ -12,8 +12,9 @@ import logging
 import torch
 import torch.distributed as dist
 
-from transformers import LlamaTokenizerFast, AutoConfig
+from transformers import LlamaTokenizerFast, AutoConfig, AutoTokenizer
 from eval_utils.modeling_llama_2 import LlamaForCausalLM
+from eval_utils.modeling_qwen2 import Qwen2ForCausalLM
 from utils import data_utils, eval_utils, utils
 from utils.process_args import process_args_ptq
 from eval_utils import rotation_utils
@@ -802,11 +803,18 @@ def collect_act():
         process_word_embeddings = True
 
     dtype = torch.bfloat16 if training_args.bf16 else torch.float16
-    model = LlamaForCausalLM.from_pretrained(
-        pretrained_model_name_or_path=model_args.input_model,
-        torch_dtype=dtype,
-        config=config,
-    )
+    if "llama" in model_args.input_model.lower():
+        model = LlamaForCausalLM.from_pretrained(
+            pretrained_model_name_or_path=model_args.input_model,
+            torch_dtype=dtype,
+            config=config,
+        )
+    elif "qwen2" in model_args.input_model.lower() and "vl" not in model_args.input_model.lower():
+        model = Qwen2ForCausalLM.from_pretrained(
+            pretrained_model_name_or_path=model_args.input_model,
+            torch_dtype=dtype,
+            config=config,
+        )
 
     if process_word_embeddings:
         model.lm_head.weight.data = model.model.embed_tokens.weight.data.clone()
@@ -815,7 +823,7 @@ def collect_act():
 
     model.seqlen = training_args.model_max_length
 
-    tokenizer = LlamaTokenizerFast.from_pretrained(
+    tokenizer = AutoTokenizer.from_pretrained(
         pretrained_model_name_or_path=model_args.input_model,
         cache_dir=training_args.cache_dir,
         model_max_length=training_args.model_max_length,
@@ -941,8 +949,8 @@ def collect_act():
 
 
 if __name__ == "__main__":
-    # collect_act()
+    collect_act()
     # plot_rank_ablation()
     # plot_samples_ablation()
     # plot_layer_benchmark()
-    plot_e2e_decoder_benchmark()
+    # plot_e2e_decoder_benchmark()

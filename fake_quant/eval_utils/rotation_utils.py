@@ -236,21 +236,28 @@ def rotate_model(model, args):
     rotate_head(model, R1)
 
 
-def rearrange_o_proj(layer, residual_length, head_dim, training):
+def rearrange_o_proj(layer, high_bits_length, low_bits_length, head_dim, training):
     o_proj = layer.self_attn.o_proj
 
     in_dim = o_proj.weight.shape[-1]
     num_replicated_heads = in_dim // head_dim
-    residual_per_head = residual_length // num_replicated_heads
+    high_length_per_head = high_bits_length // num_replicated_heads
+    low_length_per_head = low_bits_length // num_replicated_heads
     # rearrange dimensions
     chunk_starts = torch.arange(0, in_dim, head_dim)
-    high_precision_columns = torch.arange(head_dim - residual_per_head, head_dim, 1)
+    high_precision_columns = torch.arange(head_dim - high_length_per_head, head_dim, 1)
     columns_to_end = (chunk_starts.unsqueeze(1) + high_precision_columns).flatten()
+    
+    low_precision_columns = torch.arange(0, low_length_per_head, 1)
+    columns_to_beginning = (chunk_starts.unsqueeze(1) + low_precision_columns).flatten()
+
     all_columns = torch.arange(in_dim)
     mask = torch.ones(in_dim, dtype=torch.bool)
     mask[columns_to_end] = False
+    mask[columns_to_beginning] = False
+
     remaining_columns = all_columns[mask]
-    new_column_order = torch.cat((remaining_columns, columns_to_end))
+    new_column_order = torch.cat((columns_to_beginning, remaining_columns, columns_to_end))
     permutation_matrix = torch.eye(in_dim)[:, new_column_order]
 
     # rearrange weights of o_proj
@@ -372,17 +379,23 @@ def fuse_basis_shared(model, args):
     R_dict = torch.load(args.optimized_rotation_path)
     R1_1 = R_dict["R1_1"].cuda().to(torch.float64)
     R1_2 = R_dict["R1_2"].cuda().to(torch.float64)
+    R1 = torch.block_diag(R1_1, R1_2)
+    R1_0 = R_dict["R1_0"]
+    if R1_0 is not None:
+        R1 = torch.block_diag(R1_0.cuda().to(torch.float64), R1)
+    
     R2_1 = R_dict["R2_1"].cuda().to(torch.float64)
     R2_2 = R_dict["R2_2"].cuda().to(torch.float64)
-    R1 = torch.block_diag(R1_1, R1_2)
     R2 = torch.block_diag(R2_1, R2_2)
-
+    R2_0 = R_dict["R2_0"]
+    if R2_0 is not None:
+        R2 = torch.block_diag(R2_0.cuda().to(torch.float64), R2)
     config = model.config
     num_heads = config.num_attention_heads
     model_dim = config.hidden_size
-    residual_length = int(args.residual_fraction * model_dim)
+    high_bits_length = int(args.high_fraction * model_dim)
     assert (
-        R1_2.shape[0] == residual_length
+        R1_2.shape[0] == high_bits_length
     )  # checking if rotation dimensions align with residual length
     head_dim = model_dim // num_heads
     U_cpk = torch.load(args.optimized_basis_path)
@@ -392,7 +405,8 @@ def fuse_basis_shared(model, args):
 
     torch.distributed.barrier()
     rotate_embeddings(model, U_attn)
-    rotate_head(model, torch.inverse(U_attn).t())
+    # rotate_head(model, torch.inverse(U_attn).t())
+    rotate_head(model, U_attn)
 
     utils.cleanup_memory()
 
@@ -493,15 +507,15 @@ def rearrange_columns(model, args, training):
     model_dim = config.hidden_size
     head_dim = model_dim // num_heads
     mlp_dim = model.config.intermediate_size
-    residual_length = int(args.residual_fraction * model_dim)
+    high_bits_length = int(args.high_fraction * model_dim)
+    low_bits_length = int(args.low_fraction * model_dim)
     torch.distributed.barrier()
     utils.cleanup_memory()
     layers = [layer for layer in model.model.layers]
     for idx, layer in enumerate(
         tqdm.tqdm(layers, unit="layer", desc="Rearranging O_proj rows")
     ):
-        residual_length = int(args.residual_fraction * model_dim)
-        rearrange_o_proj(layers[idx], residual_length, head_dim, training)
+        rearrange_o_proj(layers[idx], high_bits_length, low_bits_length, head_dim, training)
 
         # residual_length = int(args.residual_fraction * mlp_dim)
         # rearrange_down_proj(
@@ -533,18 +547,25 @@ class QKRotationWrapper(torch.nn.Module):
                 head_dim,
             ], f"Only token-wise/{head_dim}g quantization is supported for K-cache"
             self.k_bits = kwargs["k_bits"]
-            self.k_bits_residual = kwargs["k_bits_residual"]
+            self.k_bits_high = kwargs["k_bits_high"]
+            self.k_bits_low = kwargs["k_bits_low"]
+
             self.k_groupsize = kwargs["k_groupsize"]
             self.k_sym = kwargs["k_sym"]
             self.k_clip_ratio = kwargs["k_clip_ratio"]
-            self.residual_length_k = kwargs["residual_length_k"]
+
+            self.high_bits_length = kwargs["high_bits_length"]
+            self.low_bits_length = kwargs["low_bits_length"]
+
             self.k_quantizer.configure(
                 bits=self.k_bits,
                 groupsize=-1,  # we put -1 to be toke-wise quantization and handle head-wise quantization by ourself
                 sym=self.k_sym,
                 clip_ratio=self.k_clip_ratio,
-                residual_length=self.residual_length_k,
-                residual_bits=8,
+                high_bits_length=self.high_bits_length,
+                high_bits=self.k_bits_high,
+                low_bits_length=self.low_bits_length,
+                low_bits=self.k_bits_low,
             )
             self.pre_rotation_quantizer.configure(
                 bits=8,

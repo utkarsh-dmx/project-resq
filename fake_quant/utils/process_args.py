@@ -194,6 +194,19 @@ def parser_gen():
         help="""Number of bits for K-cache quantization.
                         Note that quantizing the K-cache needs another rotation for the keys/queries""",
     )
+    parser.add_argument(
+        "--high_bits",
+        type=int,
+        default=16,
+        help="""Number of bits for high precision component when doing mixed precision quantization""",
+    )
+    parser.add_argument(
+        "--low_bits",
+        type=int,
+        default=16,
+        help="""Number of bits for high precision component when doing mixed precision quantization""",
+    )
+
     parser.add_argument("--k_groupsize", type=int, default=-1)
     parser.add_argument(
         "--k_asym",
@@ -215,7 +228,14 @@ def parser_gen():
     )
 
     parser.add_argument(
-        "--residual_fraction",
+        "--high_fraction",
+        type=float,
+        default=0,
+        help="Fraction of channels to keep in floating point.",
+    )
+
+    parser.add_argument(
+        "--low_fraction",
         type=float,
         default=0,
         help="Fraction of channels to keep in floating point.",

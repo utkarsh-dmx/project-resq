@@ -68,6 +68,7 @@ def ptq_model(args, model, model_args=None):
                 eval_mode=False,
             )
             quantizers = gptq_utils.gptq_fwrd(model, trainloader, "cuda", args)
+            # quantizers = gptq_utils.lwc_fwrd(model, trainloader, "cuda", args)
             save_dict["w_quantizers"] = quantizers
         else:  # RTN Weight Quantization
             quantizers = gptq_utils.rtn_fwrd(model, "cuda", args)
@@ -97,48 +98,61 @@ def ptq_model(args, model, model_args=None):
             mlp_dim = model.config.intermediate_size
             v_groupsize = head_dim
             if args.rotate_mode == "resq" or args.rotate_mode == "quik":
-                residual_fraction = args.residual_fraction
-                residual_length = int(residual_fraction * model_dim)
+                high_bits_fraction = args.high_fraction
+                high_bits_length = int(high_bits_fraction * model_dim)
+                low_bits_fraction = args.low_fraction
+                low_bits_length = int(low_bits_fraction * model_dim)
 
             else:
-                residual_length = 0
+                high_bits_length = 0
+                low_bits_length = 0
 
             if "v_proj" in name and args.v_bits < 16:  # Set the v_proj precision
                 if args.rotate_mode == "resq" or args.rotate_mode == "quik":
                     # per group residual
-                    v_residual_length = int(v_groupsize * residual_fraction)
+                    v_high_bits_length = int(v_groupsize * high_bits_fraction)
+                    v_low_bits_length = int(v_groupsize * low_bits_fraction)
                 else:
-                    v_residual_length = 0
+                    v_high_bits_length = 0
+                    v_low_bits_length = 0
 
                 qlayers[name].out_quantizer.configure(
                     bits=args.v_bits,
                     groupsize=v_groupsize,
                     sym=not (args.v_asym),
                     clip_ratio=args.v_clip_ratio,
-                    residual_length=v_residual_length,
-                    residual_bits=8,
+                    high_bits_length=v_high_bits_length,
+                    high_bits=args.high_bits,
+                    low_bits_length=v_low_bits_length,
+                    low_bits=args.low_bits,
                 )
             if "o_proj" in name:
                 layer_groupsize = head_dim
                 if args.rotate_mode == "resq" or args.rotate_mode == "quik":
                     # per group residual
-                    residual_length = int(v_groupsize * residual_fraction)
-                else:
-                    residual_length = 0
+                    high_bits_length = int(v_groupsize * high_bits_fraction)
+                    low_bits_length = int(v_groupsize * low_bits_fraction)
 
             if "lm_head" in name:  # Skip lm_head quantization
                 layer_input_bits = 16
-                residual_length = 0
+                high_bits_length = 0
+                low_bits_length = 0
 
             if "basis_change" in name:
                 layer_input_bits = 8  #####
+                high_bits_length = 0
+                low_bits_length = 0
             
             if "visual" in name: ###### Qwen-2-VL (vision part is not quantized)
                 layer_input_bits = 16
-                residual_length = 0
+                high_bits_length = 0
+                low_bits_length = 0
 
             if "down_proj" in name:  # Set the down_proj precision
-                residual_length = 0
+                high_bits_length = 0
+                low_bits_length = 0
+                # layer_input_bits = 4
+
                 if args.int8_down_proj:
                     layer_input_bits = 8
 
@@ -147,8 +161,10 @@ def ptq_model(args, model, model_args=None):
                 groupsize=layer_groupsize,
                 sym=layer_a_sym,
                 clip_ratio=layer_a_clip,
-                residual_length=residual_length,
-                residual_bits=8,
+                high_bits_length=high_bits_length,
+                high_bits=args.high_bits,
+                low_bits_length=low_bits_length,
+                low_bits=args.low_bits,
             )
 
     if args.k_bits < 16:
@@ -163,36 +179,36 @@ def ptq_model(args, model, model_args=None):
             layers = model.model.layers
             if args.rotate_mode == "resq" or args.rotate_mode == "quik":
                 U_cpk = torch.load(args.optimized_basis_path)
-                residual_length_k = int(args.residual_fraction * head_dim)
+                # residual_length_k = int(args.residual_fraction * head_dim)
+                high_bits_length = int(args.high_fraction * head_dim)
+                low_bits_length = int(args.low_fraction * head_dim)
             else:
-                residual_length_k = 0
+                # residual_length_k = 0
+                high_bits_length = 0
+                low_bits_length = 0
 
             k_quant_config = {
                 "k_bits": args.k_bits,
-                "k_bits_residual": 8,
+                "k_bits_high": args.high_bits,
+                "k_bits_low": args.low_bits,
                 "k_groupsize": args.k_groupsize,
                 "k_sym": not (args.k_asym),
                 "k_clip_ratio": args.k_clip_ratio,
-                "residual_length_k": residual_length_k,
+                "high_bits_length": high_bits_length,
+                "low_bits_length": low_bits_length,
             }
 
             for idx, layer in enumerate(layers):
                 if args.rotate_mode == "resq" or args.rotate_mode == "quik":
+                    R_dict = torch.load(args.optimized_rotation_path)
+                    R2_1 = R_dict["R2_1"].cuda().to(torch.float64)
+                    R2_2 = R_dict["R2_2"].cuda().to(torch.float64)
+                    R2 = torch.block_diag(R2_1, R2_2)
+                    R2_0 = R_dict["R2_0"]
+                    if R2_0 is not None:
+                        R2 = torch.block_diag(R2_0.cuda().to(torch.float64), R2)
                     k_rotation = U_cpk[f"layer.{idx}.self_attn.key_pos"].cuda()
-
-                    rot2 = random_orthogonal_matrix(residual_length_k, "cuda")
-                    rot1 = random_orthogonal_matrix(
-                        layer.self_attn.head_dim - residual_length_k, "cuda"
-                    )
-
-                    k_rotation_1 = torch.matmul(
-                        k_rotation[:, :-residual_length_k], rot1
-                    )
-                    k_rotation_2 = torch.matmul(
-                        k_rotation[:, -residual_length_k:], rot2
-                    )
-                    k_rotation = torch.cat([k_rotation_1, k_rotation_2], dim=-1)
-
+                    k_rotation = torch.matmul(k_rotation, R2)
                     quantizer = quant_utils.WeightQuantizer()
                     quantizer.configure(8)
                     quantizer.find_params(k_rotation)

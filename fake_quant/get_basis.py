@@ -400,15 +400,17 @@ def get_basis(model_args, training_args, ptq_args) -> None:
     kv_heads = llm.config.num_key_value_heads
     down_proj_blocksize = ptq_args.down_proj_blocksize
     nlayers = len(layers)
-    residual_fraction = ptq_args.residual_fraction
-    residual_length_hidden = int(residual_fraction * hidden_dim)
-    residual_length_head = int(residual_fraction * head_dim)
-    residual_length_down_proj = int(residual_fraction * down_proj_blocksize)
+    
+    low_frac, high_frac = ptq_args.low_fraction, ptq_args.high_fraction
+    low_length_hidden, high_length_hidden = int(low_frac * hidden_dim), int(high_frac * hidden_dim)
+    low_length_head, high_length_head = int(low_frac * head_dim), int(high_frac * head_dim)
+    low_length_down_proj, high_length_down_proj = int(low_frac * down_proj_blocksize), int(high_frac * down_proj_blocksize)
+
     rotation_granularity = ptq_args.rotation_granularity
 
     sparse_fraction = ptq_args.sparse_fraction
-    sparse_length_hidden = int(sparse_fraction * hidden_dim)
-    sparse_length_head = int(sparse_fraction * head_dim)
+    sparse_length_hidden = int(sparse_fraction * low_length_hidden)
+    sparse_length_head = int(sparse_fraction * low_length_head)
 
     if '70b' in model_args.input_model.lower() or "72b" in model_args.input_model.lower() :
         cov_device = 'cpu'
@@ -445,7 +447,7 @@ def get_basis(model_args, training_args, ptq_args) -> None:
         device=cov_device,
     )
     R1_1 = random_orthogonal_matrix(
-        hidden_dim - residual_length_hidden - sparse_length_hidden, "cuda"
+        hidden_dim - high_length_hidden - low_length_hidden - sparse_length_hidden, "cuda"
     )
     if sparse_length_hidden > 0:
         zeros = torch.zeros(
@@ -456,28 +458,48 @@ def get_basis(model_args, training_args, ptq_args) -> None:
         R1_1 = torch.block_diag(zeros, R1_1)
 
     rotation_dict["R1_1"] = R1_1
-    rotation_dict["R1_2"] = random_orthogonal_matrix(residual_length_hidden, "cuda")
+    rotation_dict["R1_2"] = random_orthogonal_matrix(high_length_hidden, "cuda")
+    if low_length_hidden != 0 :
+        R1_0 = random_orthogonal_matrix(low_length_hidden - sparse_length_hidden, "cuda")
+        if sparse_length_hidden > 0:
+            zeros = torch.zeros(
+                (sparse_length_hidden, sparse_length_hidden),
+                device=R1_1.device,
+                dtype=R1_1.dtype,
+            )
+            R1_0 = torch.block_diag(zeros, R1_0)
+        rotation_dict["R1_0"] = R1_0
+    else:
+        rotation_dict["R1_0"] = None
+
 
     R2_1 = random_orthogonal_matrix(
-        head_dim - residual_length_head - sparse_length_head,
+        head_dim - high_length_head - low_length_head,
         "cuda",
     )
-    if sparse_length_hidden > 0:
-        zeros = torch.zeros(
-            (sparse_length_head, sparse_length_head),
-            device=R2_1.device,
-            dtype=R2_1.dtype,
-        )
-        R2_1 = torch.block_diag(zeros, R2_1)
-
     rotation_dict["R2_1"] = R2_1
-    rotation_dict["R2_2"] = random_orthogonal_matrix(residual_length_head, "cuda")
+    rotation_dict["R2_2"] = random_orthogonal_matrix(high_length_head, "cuda")
+    if low_length_head != 0 :
+        R2_0 = random_orthogonal_matrix(low_length_head - sparse_length_head, "cuda")
+        if sparse_length_hidden > 0:
+            zeros = torch.zeros(
+                (sparse_length_head, sparse_length_head),
+                device=R2_1.device,
+                dtype=R2_1.dtype,
+            )
+            R2_0 = torch.block_diag(zeros, R2_0)
+        rotation_dict["R2_0"] = R2_0
+    else:
+        rotation_dict["R2_0"] = None
+
 
     os.makedirs(model_args.output_rotation_path, exist_ok=True)
     rotation_path = os.path.join(
         model_args.output_rotation_path,
-        "R-high_prec-"
-        + str(residual_fraction)
+        "R-high-"
+        + str(high_frac)
+        + "-low-"
+        +str(low_frac)
         + "-sparse-"
         + str(sparse_fraction)
         + "-"
