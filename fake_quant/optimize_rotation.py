@@ -114,6 +114,7 @@ def train() -> None:
 
     #mixed precision quant
     low_frac, high_frac = ptq_args.low_fraction, ptq_args.high_fraction
+    sparse_fraction = ptq_args.sparse_fraction
     low_length_hidden, high_length_hidden = int(low_frac * model_dim), int(high_frac * model_dim)
     low_length_head, high_length_head = int(low_frac * head_dim), int(high_frac * head_dim)
 
@@ -315,13 +316,29 @@ def train() -> None:
     print(R_dict.keys())
     if local_rank == 0:
         os.makedirs(model_args.output_rotation_path, exist_ok=True)
+        rotation_path = os.path.join(
+            model_args.output_rotation_path,
+            "R-high-"
+            + str(high_frac)
+            + "-low-"
+            +str(low_frac)
+            + "-sparse-"
+            + str(sparse_fraction)
+            + "-"
+            + model_args.input_model.split("/")[1]
+            + ".bin",
+        )
         torch.save(
             R_dict,
-            model_args.output_rotation_path,
+            rotation_path,
         )
         # also remove the checkpoint folder, we dont need it not
         # os.rmdir(training_args.output_dir)
+    
     dist.barrier()
+    with torch.no_grad():
+        dataset_ppl = eval_utils.evaluator_cuda(model, testloader, utils.DEV, ptq_args)
+    log.info("wiki2 ppl is: {}".format(dataset_ppl))
 
 
 if __name__ == "__main__":
