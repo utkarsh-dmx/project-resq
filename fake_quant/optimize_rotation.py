@@ -312,16 +312,12 @@ def train() -> None:
             or "R2_2.weight" in key
         )
     }
-    # print(R_dict.keys())
+    print(R_dict.keys())
     if local_rank == 0:
         os.makedirs(model_args.output_rotation_path, exist_ok=True)
-        path = os.path.join(
-            model_args.output_rotation_path,
-            "R-" + model_args.input_model.split("/")[1] + ".bin",
-        )
         torch.save(
             R_dict,
-            path,
+            model_args.output_rotation_path,
         )
         # also remove the checkpoint folder, we dont need it not
         # os.rmdir(training_args.output_dir)
