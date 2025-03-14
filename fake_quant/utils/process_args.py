@@ -244,7 +244,7 @@ def parser_gen():
     parser.add_argument(
         "--sparse_fraction",
         type=float,
-        default=0,
+        default=0.0,
         help="Fraction of channels to prune.",
     )
 

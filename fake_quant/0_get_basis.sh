@@ -6,7 +6,7 @@
 # LICENSE file in the root directory of this source tree.
 
 python get_basis.py \
---input_model Qwen/Qwen2.5-7B \
+--input_model meta-llama/Llama-3.2-1B \
 --output_rotation_path "rotation" \
 --model_max_length 2048 \
 --down_proj_blocksize 256 \
@@ -15,5 +15,5 @@ python get_basis.py \
 --rotation_granularity "full_shared" \
 --rotate_mode "resq" \
 --nsamples 512 \
---calib_dataset "alpaca" \
+--calib_dataset "wikitext" \
 --sparse_fraction 0.0 \

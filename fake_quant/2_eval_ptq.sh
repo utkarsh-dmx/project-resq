@@ -23,12 +23,12 @@ torchrun --nnodes=1 --nproc_per_node=1 --master_port=24544 ptq.py \
 --a_asym \
 --k_asym \
 --v_asym \
---k_groupsize 128 \
---v_groupsize 128 \
+--k_groupsize 64 \
+--v_groupsize 64 \
 --high_fraction 0.125 \
 --low_fraction 0.0 \
 --rotate_mode "resq" \
---optimized_rotation_path ./rotation/R-high-0.125-low-0.0-sparse-0-Llama-3.2-1B-trained.bin \
+--optimized_rotation_path ./rotation/R-high-0.125-low-0.0-sparse-0.0-Llama-3.2-1B.bin \
 --optimized_basis_path ./rotation/U-wikitext-512-Llama-3.2-1B.bin \
 --rotation_granularity 'full_shared' \
 --rotate \
