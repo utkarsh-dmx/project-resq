@@ -399,12 +399,7 @@ def fuse_basis_shared(model, args):
         if R1_0 is not None:
             R1 = torch.block_diag(R1_0.cuda().to(torch.float64), R1)
         
-        R2_1 = R_dict["R2_1"].cuda().to(torch.float64)
-        R2_2 = R_dict["R2_2"].cuda().to(torch.float64)
-        R2 = torch.block_diag(R2_1, R2_2)
-        R2_0 = R_dict["R2_0"]
-        if R2_0 is not None:
-            R2 = torch.block_diag(R2_0.cuda().to(torch.float64), R2)
+        
 
         U_attn = torch.matmul(U_attn, R1)
     
@@ -423,6 +418,23 @@ def fuse_basis_shared(model, args):
         key = f"layer.{idx}.self_attn.value"
         U_value = U_cpk[key].cuda()
         if not args.train_rotations:
+            if 'trained' in args.optimized_rotation_path:
+                print("here")
+                R2_1 = R_dict[f"model.layers.{idx}.self_attn.R2_1"].cuda().to(torch.float64)
+                R2_2 = R_dict[f"model.layers.{idx}.self_attn.R2_1"].cuda().to(torch.float64)
+                R2 = torch.block_diag(R2_1, R2_2)
+                breakpoint()
+                if f"model.layers.{idx}.self_attn.R2_0" in R_dict.keys():
+                    R2_0 = R_dict[f"model.layers.{idx}.self_attn.R2_0"].cuda().to(torch.float64)
+                    R2 = torch.block_diag(R2_0, R2)
+            else:
+                R2_1 = R_dict["R2_1"].cuda().to(torch.float64)
+                R2_2 = R_dict["R2_2"].cuda().to(torch.float64)
+                R2 = torch.block_diag(R2_1, R2_2)
+                R2_0 = R_dict["R2_0"]
+                if R2_0 is not None:
+                    R2 = torch.block_diag(R2_0.cuda().to(torch.float64), R2)
+            
             U_value = torch.matmul(U_value, R2)
 
         rotate_ov_proj(layers[idx], num_heads, head_dim, R2=U_value, per_head=True)

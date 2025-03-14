@@ -158,10 +158,10 @@ def prepare_model(args, model):
                 RK_0 = random_orthogonal_matrix(low_length_head, "cuda")
             else:
                 RK_0 = None
-            R_dict["RK_1"] = RK_1
-            R_dict["RK_2"] = RK_2
+            R_dict["R2_1"] = RK_1
+            R_dict["R2_2"] = RK_2
             RK = torch.block_diag(RK_1, RK_2)
-            R_dict["RK_0"] = RK_0
+            R_dict["R2_0"] = RK_0
             if RK_0 is not None:
                 RK = torch.block_diag(RK_0, RK)
             for idx, layer in enumerate(layers):

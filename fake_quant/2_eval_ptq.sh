@@ -8,12 +8,12 @@
 ### k_groupsize, v_groupsize = 64 only for Llama-3.2-1B else 128
 #### Storing config for 70B model
 torchrun --nnodes=1 --nproc_per_node=1 --master_port=24544 ptq.py \
---input_model Qwen/Qwen2.5-7B \
+--input_model meta-llama/Llama-3.2-1B \
 --per_device_eval_batch_size 1 \
 --model_max_length 2048 \
 --fp16 False \
 --bf16 True \
---w_bits 4 \
+--w_bits 16 \
 --a_bits 4 \
 --k_bits 4 \
 --v_bits 4 \
@@ -28,8 +28,8 @@ torchrun --nnodes=1 --nproc_per_node=1 --master_port=24544 ptq.py \
 --high_fraction 0.125 \
 --low_fraction 0.0 \
 --rotate_mode "resq" \
---optimized_rotation_path ./rotation/R-high-0.125-low-0.0-sparse-0.0-Qwen2.5-7B.bin \
---optimized_basis_path ./rotation/U-ptb-512-Qwen2.5-7B.bin \
+--optimized_rotation_path ./rotation/R-high-0.125-low-0.0-sparse-0-Llama-3.2-1B-trained.bin \
+--optimized_basis_path ./rotation/U-wikitext-512-Llama-3.2-1B.bin \
 --rotation_granularity 'full_shared' \
 --rotate \
 --tasks "mmlu,boolq,piqa,social_iqa,hellaswag,winogrande,arc_easy,arc_challenge,openbookqa" \

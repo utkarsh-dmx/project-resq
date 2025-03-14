@@ -15,9 +15,9 @@ torchrun --nnodes=1 --nproc_per_node=8 --master_port=24544 optimize_rotation.py 
 --fp16 False \
 --bf16 True \
 --w_bits 16 \
---a_bits 16 \
---k_bits 16 \
---v_bits 16 \
+--a_bits 4 \
+--k_bits 4 \
+--v_bits 4 \
 --high_bits 8 \
 --low_bits 2 \
 --w_clip \
@@ -29,7 +29,7 @@ torchrun --nnodes=1 --nproc_per_node=8 --master_port=24544 optimize_rotation.py 
 --high_fraction 0.125 \
 --low_fraction 0.0 \
 --rotate_mode "resq" \
---ouptut_rotation_path "rotation" \
+--output_rotation_path "rotation" \
 --optimized_basis_path ./rotation/U-wikitext-512-Llama-3.2-1B.bin \
 --rotation_granularity 'full_shared' \
 --rotate \

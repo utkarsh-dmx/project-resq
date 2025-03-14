@@ -313,6 +313,9 @@ def train() -> None:
             or "R2_2.weight" in key
         )
     }
+    if 'R1_0' not in R_dict.keys():
+        R_dict["R1_0"] = None
+
     print(R_dict.keys())
     if local_rank == 0:
         os.makedirs(model_args.output_rotation_path, exist_ok=True)
@@ -326,6 +329,7 @@ def train() -> None:
             + str(sparse_fraction)
             + "-"
             + model_args.input_model.split("/")[1]
+            + "-trained"
             + ".bin",
         )
         torch.save(
