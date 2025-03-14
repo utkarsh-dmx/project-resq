@@ -216,6 +216,7 @@ def evaluate(model, tokenizer, args):
             apply_chat_template=apply_chat_template,
         )
         results.update(t_results)
+        log.info(make_table(t_results))
         print(make_table(t_results))
 
     if args.long_bench_tasks != "":
@@ -276,7 +277,6 @@ def evaluate(model, tokenizer, args):
 
     return results
 
-
 def seed_everything(seed):
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
@@ -285,6 +285,7 @@ def seed_everything(seed):
     torch.backends.cudnn.benchmark = False
     torch.backends.cudnn.deterministic = True
     torch.cuda.manual_seed_all(seed)
+
 
 
 def train() -> None:

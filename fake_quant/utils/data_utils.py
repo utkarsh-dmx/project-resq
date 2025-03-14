@@ -19,6 +19,8 @@ import transformers
 def get_wikitext2(
     nsamples=128, seed=0, seqlen=2048, model="", tokenizer=None, eval_mode=False, vision=False,
 ):
+    print("get_wikitext2")
+    
     if tokenizer is None:
         if vision:
             tokenizer = transformers.AutoProcessor.from_pretrained(model)
@@ -100,6 +102,65 @@ def get_c4(
             trainloader.append((inp, tar))
         return trainloader
 
+def get_ptb(
+    nsamples=128, seed=0, seqlen=2048, model="", tokenizer=None, eval_mode=False, vision=False,
+):
+    print("get_ptb")
+    
+    if tokenizer is None:
+        if vision:
+            tokenizer = transformers.AutoProcessor.from_pretrained(model)
+        else:
+            tokenizer = transformers.AutoTokenizer.from_pretrained(model, use_fast=False)
+
+    if eval_mode:
+        testdata = datasets.load_dataset("ptb_text_only", "penn_treebank", split="test")
+        testenc = tokenizer(text="\n\n".join(testdata["sentence"]), return_tensors="pt")
+        return testenc
+    else:
+        traindata = datasets.load_dataset("ptb_text_only", "penn_treebank", split="train", trust_remote_code=True)
+        trainenc = tokenizer("\n\n".join(traindata["sentence"]), return_tensors="pt")
+        random.seed(seed)
+        trainloader = []
+        for _ in range(nsamples):
+            i = random.randint(0, trainenc.input_ids.shape[1] - seqlen - 1)
+            j = i + seqlen
+            inp = trainenc.input_ids[:, i:j]
+            tar = inp.clone()
+            tar[:, :-1] = -100
+            trainloader.append((inp, tar))
+        return trainloader
+
+def get_alpaca(
+    nsamples=128, seed=0, seqlen=2048, model="", tokenizer=None, eval_mode=False, vision=False,
+):
+    print("get_alpaca")
+    
+    if tokenizer is None:
+        if vision:
+            tokenizer = transformers.AutoProcessor.from_pretrained(model)
+        else:
+            tokenizer = transformers.AutoTokenizer.from_pretrained(model, use_fast=False)
+
+    if eval_mode:
+        raise ValueError # no eval set for alpaca
+    else:
+        ds = datasets.load_dataset('tatsu-lab/alpaca')
+        ds = ds.remove_columns(['input', 'output', 'instruction'])
+        traindata = ds["train"]
+        trainenc = tokenizer("\n\n".join(traindata['text']), return_tensors='pt')
+        random.seed(seed)
+        trainloader = []
+        for _ in range(nsamples):
+            i = random.randint(0, trainenc.input_ids.shape[1] - seqlen - 1)
+            j = i + seqlen
+            inp = trainenc.input_ids[:, i:j]
+            tar = inp.clone()
+            tar[:, :-1] = -100
+            trainloader.append((inp, tar))
+        
+        return trainloader
+
 
 def get_data(
     calib_dataset="wikitext",
@@ -115,6 +176,10 @@ def get_data(
         return get_wikitext2(nsamples, seed, seqlen, model, tokenizer, eval_mode, vision)
     elif "c4" in calib_dataset:
         return get_c4(nsamples, seed, seqlen, model, tokenizer, eval_mode, vision)
+    elif "ptb" in calib_dataset:
+        return get_ptb(nsamples, seed, seqlen, model, tokenizer, eval_mode, vision)
+    elif "alpaca" in calib_dataset:
+        return get_alpaca(nsamples, seed, seqlen, model, tokenizer, eval_mode, vision)
     else:
         raise NotImplementedError
 

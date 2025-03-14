@@ -282,6 +282,8 @@ def parser_gen():
 
     parser.add_argument("--flash_attn", action="store_true")
     parser.add_argument("--rotation_granularity", default="per_layer")
+    
+    parser.add_argument("--train_rotations", action="store_true")
 
     # Experiments Arguments
     parser.add_argument(

@@ -376,36 +376,41 @@ def fuse_basis_one_per_decoder(model, args):
 
 
 def fuse_basis_shared(model, args):
-    R_dict = torch.load(args.optimized_rotation_path)
-    R1_1 = R_dict["R1_1"].cuda().to(torch.float64)
-    R1_2 = R_dict["R1_2"].cuda().to(torch.float64)
-    R1 = torch.block_diag(R1_1, R1_2)
-    R1_0 = R_dict["R1_0"]
-    if R1_0 is not None:
-        R1 = torch.block_diag(R1_0.cuda().to(torch.float64), R1)
-    
-    R2_1 = R_dict["R2_1"].cuda().to(torch.float64)
-    R2_2 = R_dict["R2_2"].cuda().to(torch.float64)
-    R2 = torch.block_diag(R2_1, R2_2)
-    R2_0 = R_dict["R2_0"]
-    if R2_0 is not None:
-        R2 = torch.block_diag(R2_0.cuda().to(torch.float64), R2)
     config = model.config
     num_heads = config.num_attention_heads
     model_dim = config.hidden_size
     high_bits_length = int(args.high_fraction * model_dim)
-    assert (
-        R1_2.shape[0] == high_bits_length
-    )  # checking if rotation dimensions align with residual length
     head_dim = model_dim // num_heads
+    
     U_cpk = torch.load(args.optimized_basis_path)
-
     U_attn = U_cpk["attn_mlp"].cuda()
-    U_attn = torch.matmul(U_attn, R1)
 
+    if not args.train_rotations:
+        R_dict = torch.load(args.optimized_rotation_path)
+        R1_1 = R_dict["R1_1"].cuda().to(torch.float64)
+        R1_2 = R_dict["R1_2"].cuda().to(torch.float64)
+
+        assert (
+            R1_2.shape[0] == high_bits_length
+        )  # checking if rotation dimensions align with residual length
+            
+        R1 = torch.block_diag(R1_1, R1_2)
+        R1_0 = R_dict["R1_0"]
+        if R1_0 is not None:
+            R1 = torch.block_diag(R1_0.cuda().to(torch.float64), R1)
+        
+        R2_1 = R_dict["R2_1"].cuda().to(torch.float64)
+        R2_2 = R_dict["R2_2"].cuda().to(torch.float64)
+        R2 = torch.block_diag(R2_1, R2_2)
+        R2_0 = R_dict["R2_0"]
+        if R2_0 is not None:
+            R2 = torch.block_diag(R2_0.cuda().to(torch.float64), R2)
+
+        U_attn = torch.matmul(U_attn, R1)
+    
     torch.distributed.barrier()
+    
     rotate_embeddings(model, U_attn)
-    # rotate_head(model, torch.inverse(U_attn).t())
     rotate_head(model, U_attn)
 
     utils.cleanup_memory()
@@ -416,7 +421,9 @@ def fuse_basis_shared(model, args):
         rotate_attention_inputs(layers[idx], U_attn)
 
         key = f"layer.{idx}.self_attn.value"
-        U_value = torch.matmul(U_cpk[key].cuda(), R2)
+        U_value = U_cpk[key].cuda()
+        if not args.train_rotations:
+            U_value = torch.matmul(U_value, R2)
 
         rotate_ov_proj(layers[idx], num_heads, head_dim, R2=U_value, per_head=True)
 

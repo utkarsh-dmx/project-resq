@@ -8,8 +8,6 @@
 ### k_groupsize, v_groupsize = 64 only for Llama-3.2-1B else 128
 torchrun --nnodes=1 --nproc_per_node=1 --master_port=24556 collect_activations.py \
 --input_model Qwen/Qwen2.5-3B \
---do_train False \
---do_eval True \
 --per_device_eval_batch_size 8 \
 --model_max_length 2048 \
 --fp16 False \

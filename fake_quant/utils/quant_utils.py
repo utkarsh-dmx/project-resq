@@ -382,54 +382,19 @@ class ActQuantWrapper(torch.nn.Module):
         x,
         R1=None,
         R2=None,
-        R4=None,
         transpose=False,
-        both=False,
-        rearrange_order=None,
-        R1_2=None,
         column_order=None,
     ):
         x_dtype = x.dtype
         # Rotate, if needed
         if self.online_full_had:
             if self.fp32_had:  # Full Hadamard in FP32
-                if self.no_had:
-                    shape = x.shape
-                    n = shape[-1]
-                    K = self.K
-                    x_ = x
-                    if self.hadK_quantizer.bits < 16:
-                        self.hadK_quantizer.find_params(x_)
-                        x_ = self.hadK_quantizer(x_).to(x_dtype)
-                    x_ = x_.view(-1, n // K, K)
-                    x = torch.matmul(x_.float(), self.had_K).reshape(shape).to(x_dtype)
-                    if column_order is not None:
-                        x = x[..., column_order]
-
-                else:
-                    x = hadamard_utils.matmul_hadU_cuda(
-                        x.float(), self.had_K, self.K
-                    ).to(x_dtype)
+                x = hadamard_utils.matmul_hadU_cuda(x.float(), self.had_K, self.K).to(
+                    x_dtype
+                )
             else:  # Full Hadamard in FP16
-                if self.no_had:
-                    shape = x.shape
-                    n = shape[-1]
-                    K = self.K
-                    x_ = x
-                    if self.hadK_quantizer.bits < 16:
-                        self.hadK_quantizer.find_params(x_)
-                        x_ = self.hadK_quantizer(x_).to(x_dtype)
-                    x_ = x_.view(-1, n // K, K)
-                    x = (
-                        torch.matmul(x_, self.had_K.to(x_dtype))
-                        .reshape(shape)
-                        .to(x_dtype)
-                    )
-                    if column_order is not None:
-                        x = x[..., column_order]
-                else:
-                    x = hadamard_utils.matmul_hadU_cuda(x, self.had_K, self.K)
-
+                x = hadamard_utils.matmul_hadU_cuda(x, self.had_K, self.K)
+        
         elif self.online_partial_had:
             # todo: implement this in QAttention to avoid reshaping!
 
@@ -465,14 +430,12 @@ class ActQuantWrapper(torch.nn.Module):
             x = x[..., column_order]
 
         if R1 is not None:
+            assert column_order is None #column order only used when not training rotations
             x = self.module(
                 x,
                 R1,
                 R2,
-                R4,
                 transpose,
-                both,
-                R1_2,
             ).to(x_dtype)
         else:
             x = self.module(x).to(x_dtype)

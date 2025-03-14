@@ -22,24 +22,25 @@ from transformers import (
 from utils.data_utils import get_wikitext2
 from train_utils.fsdp_trainer import FSDPTrainer
 from train_utils.main import prepare_model
-from train_utils.modeling_llama_quant_2 import (
-    LlamaForCausalLM as LlamaForCausalLMQuant,
-)
+from train_utils.modeling_llama_train import LlamaForCausalLM
+# from eval_utils.modeling_llama_2 import LlamaForCausalLM
 from train_utils.optimizer import SGDG
 from utils.data_utils import CustomJsonDataset
 from utils.hadamard_utils import (
-    random_hadamard_matrix,
-    get_hadK,
     random_orthogonal_matrix,
 )
 import math
 from utils.process_args import process_args_ptq
 from utils.utils import get_local_rank, get_logger, pt_fsdp_state_dict
 
+from transformers import AutoConfig
+import numpy as np
+import random
 # import eval_utils, utils.utils, utils.data_utils
 from utils import data_utils, eval_utils, utils
 
-log: Logger = get_logger("spinquant")
+log: Logger = utils.get_logger("resq", "log.log")
+
 
 
 def compute_metrics(eval_preds):
@@ -68,6 +69,15 @@ class RotateModule(nn.Module):
             return self.weight @ x
 
 
+def seed_everything(seed):
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    np.random.seed(seed)
+    random.seed(seed)
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = True
+    torch.cuda.manual_seed_all(seed)
+
 def train() -> None:
     dist.init_process_group(backend="nccl", timeout=datetime.timedelta(hours=8))
     model_args, training_args, ptq_args = process_args_ptq()
@@ -77,61 +87,72 @@ def train() -> None:
     torch.distributed.barrier()
 
     dtype = torch.bfloat16 if training_args.bf16 else torch.float16
-    model = LlamaForCausalLMQuant.from_pretrained(
+    
+    seed_everything(ptq_args.seed)
+    config = AutoConfig.from_pretrained(
+        model_args.input_model,
+    )
+    # ResQ is not compatiable with tie_word_embeddings, clone lm_head from embed_tokens
+    process_word_embeddings = False
+    if config.tie_word_embeddings:
+        config.tie_word_embeddings = False
+        process_word_embeddings = True
+        
+    model = LlamaForCausalLM.from_pretrained(
         pretrained_model_name_or_path=model_args.input_model,
         torch_dtype=dtype,
+        config=config,
     )
-    breakpoint()
+    
+    if process_word_embeddings:
+        model.lm_head.weight.data = model.model.embed_tokens.weight.data.clone()
 
-    model = prepare_model(ptq_args, model)
+    model, R_dict = prepare_model(ptq_args, model)
     model_dim = model.config.hidden_size
     num_heads = model.config.num_attention_heads
-    mlp_dim = model.config.intermediate_size
     head_dim = model_dim // num_heads
-    residual_length = int(ptq_args.residual_fraction * model_dim)
-    print(residual_length)
+
+    #mixed precision quant
+    low_frac, high_frac = ptq_args.low_fraction, ptq_args.high_fraction
+    low_length_hidden, high_length_hidden = int(low_frac * model_dim), int(high_frac * model_dim)
+    low_length_head, high_length_head = int(low_frac * head_dim), int(high_frac * head_dim)
+
+    rotation_granularity = ptq_args.rotation_granularity
+    assert rotation_granularity == "full_shared" # only full shared is supported at this moment
+
+
     for param in model.parameters():
         param.requires_grad = False
-    if ptq_args.residual_fraction > 0:
-        R1_1 = random_orthogonal_matrix(residual_length, "cuda")
-    R1_2 = random_orthogonal_matrix(model_dim - residual_length, "cuda")
-    model.model.R1_1 = RotateModule(R1_1)
-    model.model.R1_2 = RotateModule(R1_2)
+    
+    R1_1 = random_orthogonal_matrix(
+        model_dim - high_length_hidden - low_length_hidden, "cuda"
+    )
+    R1_2 = random_orthogonal_matrix(high_length_hidden, "cuda")
+    if low_length_hidden != 0 :
+        R1_0 = random_orthogonal_matrix(low_length_hidden, "cuda")
 
-    residual_length = int(ptq_args.residual_fraction * head_dim)
-    print(residual_length)
+    model.R1_1 = RotateModule(R1_1)
+    model.R1_2 = RotateModule(R1_2)
+    if low_length_hidden != 0:
+        model.R1_0 = RotateModule(R1_0) 
 
-    if ptq_args.residual_fraction > 0:
-        R2_1 = random_orthogonal_matrix(residual_length, "cuda")
-
-    R2_2 = random_orthogonal_matrix(
-        head_dim - residual_length,
+    R2_1 = random_orthogonal_matrix(
+        head_dim - high_length_head - low_length_head,
         "cuda",
     )
+    R2_2 = random_orthogonal_matrix(high_length_head, "cuda")
+    if low_length_head != 0 :
+        R2_0 = random_orthogonal_matrix(low_length_head, "cuda")
+    else:
+        R2_0 = None 
 
-    residual_length = int(ptq_args.residual_fraction * ptq_args.down_proj_blocksize)
-    if ptq_args.residual_fraction > 0:
-        R4_1 = random_orthogonal_matrix(residual_length, "cuda")
-
-    R4_2 = random_orthogonal_matrix(
-        ptq_args.down_proj_blocksize - residual_length,
-        "cuda",
-    )
     for i in range(model.config.num_hidden_layers):
         # Each head dim = 128 for Llama model
-
-        model.model.layers[i].R1_attn_1 = RotateModule(R1_1)
-        model.model.layers[i].R1_attn_2 = RotateModule(R1_2)
-        model.model.layers[i].R1_mlp_1 = RotateModule(R1_1)
-        model.model.layers[i].R1_mlp_2 = RotateModule(R1_2)
-
         model.model.layers[i].self_attn.R2_1 = RotateModule(R2_1)
         model.model.layers[i].self_attn.R2_2 = RotateModule(R2_2)
+        if R2_0 is not None:
+            model.model.layers[i].self_attn.R2_0 = RotateModule(R2_0)
 
-        # R4, _ = get_hadK(model.config.intermediate_size)
-        # model.model.layers[i].mlp.R4 = RotateModule(R4)
-        model.model.layers[i].mlp.R4_1 = RotateModule(R4_1)
-        model.model.layers[i].mlp.R4_2 = RotateModule(R4_2)
     if local_rank == 0:
         log.info("Model init completed for training {}".format(model))
         log.info("Start to load tokenizer...")
@@ -155,9 +176,9 @@ def train() -> None:
         tokenizer=tokenizer,
         eval_mode=True,
     )
-
-    # dataset_ppl = eval_utils.evaluator_cuda(model, testloader, utils.DEV, ptq_args)
-    # log.info("wiki2 ppl is: {}".format(dataset_ppl))
+    with torch.no_grad():
+        dataset_ppl = eval_utils.evaluator_cuda(model, testloader, utils.DEV, ptq_args)
+    log.info("wiki2 ppl is: {}".format(dataset_ppl))
     testset = testloader.input_ids
     nsamples = testset.numel() // model.seqlen
     testset = (
@@ -180,75 +201,60 @@ def train() -> None:
         calibration_datasets["test"], tokenizer, block_size=model.seqlen
     )
 
-    # trainable_parameters = [model.R1.weight] + [
-    #     model.model.layers[i].self_attn.R2.weight
-    #     for i in range(model.config.num_hidden_layers)
-    # ]
-
     trainable_parameters = []
-    # trainable_parameters.append(
-    #     {
-    #         "params": model.R1_1.weight,
-    #         "stiefel": True,
-    #         "lr": training_args.learning_rate,
-    #         "momentum": 0.9,
-    #         "nesterov": True,
-    #     }
-    # )
-    # trainable_parameters.append(
-    #     {
-    #         "params": model.R1_2.weight,
-    #         "stiefel": True,
-    #         "lr": training_args.learning_rate,
-    #         "momentum": 0.9,
-    #         "nesterov": True,
-    #     }
-    # )
+    trainable_parameters.append(
+        {
+            "params": [model.R1_1.weight, model.R1_2.weight],
+            "stiefel": True,
+            "lr": training_args.learning_rate,
+            "momentum": 0.9,
+            "nesterov": True,
+        }
+    )
+    if low_length_hidden != 0:
+        trainable_parameters.append(
+        {
+            "params": [model.R1_0.weight],
+            "stiefel": True,
+            "lr": training_args.learning_rate,
+            "momentum": 0.9,
+            "nesterov": True,
+        }
+    )
+        
     for i in range(model.config.num_hidden_layers):
         trainable_parameters.append(
             {
-                "params": model.model.layers[i].self_attn.R2_1.weight,
-                "stiefel": False,
+                "params": [model.model.layers[i].self_attn.R2_1.weight, model.model.layers[i].self_attn.R2_2.weight],
+                "stiefel": True,
+                "lr": training_args.learning_rate,
+                "momentum": 0.9,
+                "nesterov": True,
+            }
+        )
+        if low_length_head !=0 :
+            trainable_parameters.append(
+            {
+                "params": model.model.layers[i].self_attn.R2_0.weight,
+                "stiefel": True,
                 "lr": training_args.learning_rate,
                 "momentum": 0.9,
                 "nesterov": True,
             }
         )
 
-        trainable_parameters.append(
-            {
-                "params": model.model.layers[i].self_attn.R2_2.weight,
-                "stiefel": False,
-                "lr": training_args.learning_rate,
-                "momentum": 0.9,
-                "nesterov": True,
-            }
-        )
-
-        trainable_parameters.append(
-            {
-                "params": model.model.layers[i].mlp.R4_2.weight,
-                "stiefel": False,
-                "lr": training_args.learning_rate,
-                "momentum": 0.9,
-                "nesterov": True,
-            }
-        )
     for name, p in model.named_parameters():
         if (
             "R1_1.weight" in name
             or "R1_2.weight" in name
+            or "R1_0.weight" in name
+            or "R2_0.weight" in name
             or "R2_1.weight" in name
             or "R2_2.weight" in name
-            or "R4.weight" in name
         ):
             p.requires_grad = True
 
     model.seqlen = training_args.model_max_length
-    # optimizer = SGDG(trainable_parameters, lr=training_args.learning_rate, stiefel=True)
-    # optimizer = SGDG(
-    #     trainable_parameters, lr=training_args.learning_rate, stiefel=True, momentum=0.9
-    # )
     optimizer = SGDG(
         trainable_parameters,
         lr=training_args.learning_rate,
@@ -258,46 +264,20 @@ def train() -> None:
     if training_args.fsdp != "" and training_args.fsdp != []:
         MyTrainer = FSDPTrainer
 
-    training_args = TrainingArguments(
-        output_dir="./checkpoint",
-        save_strategy="steps",
-        save_steps=0.1,
-        resume_from_checkpoint=True,
-        save_safetensors=False,
-        logging_steps=0.1,
-        gradient_checkpointing=True,
-        # load_best_model_at_end=True,  # Load the best model at the end of training
-        per_device_train_batch_size=8,
-        per_device_eval_batch_size=2,
-        max_steps=training_args.max_steps,
-        # logging_first_step=True,
-        # metric_for_best_model="perplexity",
-        # greater_is_better=False,
-        # eval_strategy="steps",
-        # evaluation_strategy="steps",
-        # eval_steps=0.1,
-        auto_find_batch_size=True,
-        # eval_accumulation_steps=5,
-        save_total_limit=3,
-    )
-    # training_args.output_dir = "./checkpoint"
-    # training_args.save_strategy = "steps"
-    # training_args.save_steps = 0.1
-    # training_args.resume_from_checkpoint = True
-    # training_args.save_safetensors = False
-    # training_args.logging_steps = 0.1
-    # training_args.gradient_checkpointing = True
-    # training_args.load_best_model_at_end = (
-    # True,
-    # )  # Load the best model at the end of training
-    # training_args.metric_for_best_model = (
-    # "perplexity",
-    # )  # Use perplexity to select the best model
-    # training_args.greater_is_better = (False,)  # Lower perplexity is better
-    # training_args.eval_strategy = ("steps",)
-    # training_args.eval_steps = 1
+    # training_args = TrainingArguments(
+    #     output_dir="./checkpoint",
+    #     save_strategy="steps",
+    #     save_steps=0.1,
+    #     save_safetensors=False,
+    #     logging_steps=0.1,
+    #     gradient_checkpointing=True,
+    #     per_device_train_batch_size=training_args.per_device_train_batch_size,
+    #     per_device_eval_batch_size=training_args.per_device_eval_batch_size,
+    #     max_steps=training_args.max_steps,
+    #     auto_find_batch_size=True,
+    #     save_total_limit=3,
+    # )
 
-    # training_args.optim = "adamw_torch"
     model.gradient_checkpointing_enable()
     trainer = MyTrainer(
         model=model,
@@ -310,37 +290,27 @@ def train() -> None:
         compute_metrics=compute_metrics,  # Make sure this is included
     )
     torch.distributed.barrier()
-    # breakpoint()
-
-    # eval_results = trainer.evaluate()
-    # print(f">>> Perplexity: {math.exp(eval_results['eval_loss']):.2f}")
 
     torch.cuda.empty_cache()
     torch.distributed.barrier()
-    # trainer.train(resume_from_checkpoint=True)
-    # trainer.train()
+    trainer.train()
 
-    # eval_results = trainer.evaluate()
-    # print(f">>> Perplexity: {math.exp(eval_results['eval_loss']):.2f}")
     if training_args.fsdp != "" and training_args.fsdp != []:
         cpu_state = pt_fsdp_state_dict(trainer.model)
     else:
         cpu_state = trainer.model.state_dict()
 
-    R_dict = {
+    R_dict = R_dict | {
         key.replace(".weight", ""): value
         for key, value in cpu_state.items()
-        if "R1_1.weight" in key
-        or "R1_2.weight" in key
-        or "R1_attn_1" in key
-        or "R1_attn_2" in key
-        or "R1_mlp_1" in key
-        or "R1_mlp_2" in key
-        or "self_attn.R2_1" in key
-        or "self_attn.R2_2" in key
-        or "mlp.R4" in key
-        or "mlp.R4_1" in key
-        or "mlp.R4_2" in key
+        if (
+            "R1_1.weight" in key
+            or "R1_2.weight" in key
+            or "R1_0.weight" in key
+            or "R2_0.weight" in key
+            or "R2_1.weight" in key
+            or "R2_2.weight" in key
+        )
     }
     # print(R_dict.keys())
     if local_rank == 0:

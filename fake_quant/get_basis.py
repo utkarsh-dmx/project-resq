@@ -449,13 +449,6 @@ def get_basis(model_args, training_args, ptq_args) -> None:
     R1_1 = random_orthogonal_matrix(
         hidden_dim - high_length_hidden - low_length_hidden - sparse_length_hidden, "cuda"
     )
-    if sparse_length_hidden > 0:
-        zeros = torch.zeros(
-            (sparse_length_hidden, sparse_length_hidden),
-            device=R1_1.device,
-            dtype=R1_1.dtype,
-        )
-        R1_1 = torch.block_diag(zeros, R1_1)
 
     rotation_dict["R1_1"] = R1_1
     rotation_dict["R1_2"] = random_orthogonal_matrix(high_length_hidden, "cuda")
@@ -773,26 +766,6 @@ def get_basis(model_args, training_args, ptq_args) -> None:
                 eval_dict["layer." + str(i) + ".self_attn.value"] = eval_value.cpu()
                 eval_dict["layer." + str(i) + ".self_attn.key_pos"] = eval_k_pos.cpu()
                 eval_dict["layer." + str(i) + ".mlp.down_proj"] = eval_down_proj.cpu()
-                print(
-                    "down proj:",
-                    (
-                        eval_down_proj[-residual_length_down_proj:].sum()
-                        / eval_down_proj.sum()
-                    ).item(),
-                    ", hidden_attn_mlp:",
-                    (
-                        eval_attn_mlp[-residual_length_hidden:].sum()
-                        / eval_attn_mlp.sum()
-                    ).item(),
-                    ", v_proj:",
-                    (eval_value[:, -residual_length_head:].sum(1) / eval_value.sum(1))
-                    .mean()
-                    .item(),
-                    ", k_proj_pos:",
-                    (eval_k_pos[-residual_length_head:].sum() / eval_k_pos.sum())
-                    .mean()
-                    .item(),
-                )
 
         elif "one_per_decoder" in rotation_granularity.lower():
 
