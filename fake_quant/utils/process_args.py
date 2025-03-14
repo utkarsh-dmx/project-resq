@@ -330,11 +330,6 @@ def process_args_ptq():
     else:
         ptq_args.optimized_rotation_path = None
     
-    if model_args.output_rotation_path is not None:
-        ptq_args.output_rotation_path = model_args.output_rotation_path
-    else:
-        ptq_args.output_rotation_path = None
-
     if model_args.optimized_basis_path is not None:
         ptq_args.optimized_basis_path = model_args.optimized_basis_path
     else:
