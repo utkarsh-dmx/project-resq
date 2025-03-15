@@ -311,7 +311,6 @@ def train() -> None:
         process_word_embeddings = True
     vision = False
     if "llama" in model_args.input_model.lower():
-        
         model = LlamaForCausalLM.from_pretrained(
             pretrained_model_name_or_path=model_args.input_model,
             torch_dtype=dtype,

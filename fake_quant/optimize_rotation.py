@@ -23,6 +23,7 @@ from utils.data_utils import get_wikitext2
 from train_utils.fsdp_trainer import FSDPTrainer
 from train_utils.main import prepare_model
 from train_utils.modeling_llama_train import LlamaForCausalLM
+from train_utils.modeling_qwen2_train import Qwen2ForCausalLM
 # from eval_utils.modeling_llama_2 import LlamaForCausalLM
 from train_utils.optimizer import SGDG
 from utils.data_utils import CustomJsonDataset
@@ -33,7 +34,7 @@ import math
 from utils.process_args import process_args_ptq
 from utils.utils import get_local_rank, get_logger, pt_fsdp_state_dict
 
-from transformers import AutoConfig
+from transformers import AutoConfig, AutoTokenizer
 import numpy as np
 import random
 # import eval_utils, utils.utils, utils.data_utils
@@ -97,13 +98,19 @@ def train() -> None:
     if config.tie_word_embeddings:
         config.tie_word_embeddings = False
         process_word_embeddings = True
-        
-    model = LlamaForCausalLM.from_pretrained(
-        pretrained_model_name_or_path=model_args.input_model,
-        torch_dtype=dtype,
-        config=config,
-    )
     
+    if "llama" in model_args.input_model.lower():
+        model = LlamaForCausalLM.from_pretrained(
+            pretrained_model_name_or_path=model_args.input_model,
+            torch_dtype=dtype,
+            config=config,
+        )
+    elif "qwen2" in model_args.input_model.lower() and "vl" not in model_args.input_model.lower():
+        model = Qwen2ForCausalLM.from_pretrained(
+            pretrained_model_name_or_path=model_args.input_model,
+            torch_dtype=dtype,
+            config=config,
+        )
     if process_word_embeddings:
         model.lm_head.weight.data = model.model.embed_tokens.weight.data.clone()
 
@@ -157,7 +164,7 @@ def train() -> None:
     if local_rank == 0:
         log.info("Model init completed for training {}".format(model))
         log.info("Start to load tokenizer...")
-    tokenizer = LlamaTokenizerFast.from_pretrained(
+    tokenizer = AutoTokenizer.from_pretrained(
         pretrained_model_name_or_path=model_args.input_model,
         cache_dir=training_args.cache_dir,
         model_max_length=training_args.model_max_length,
