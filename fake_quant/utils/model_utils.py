@@ -54,6 +54,7 @@ def capture_layer_io(layer, layer_input, attn_mask, pos_ids, pos_emb):
 
     for name in captured_outputs.keys():
         module = getattr(layer.self_attn, name, None) or getattr(layer.mlp, name, None)
+
         handles.append(
             module.register_forward_hook(hook_factory(name, captured_outputs, False))
         )
@@ -92,4 +93,9 @@ def replace_single_mod_opt(module, name, layer_to_replace, org_layer_type):
                 setattr(module, attr, layer_to_replace)
 
     for name1, child in module.named_children():
-        replace_single_mod_opt(child, name + '.' + name1 if name != '' else name1, layer_to_replace, org_layer_type)
+        replace_single_mod_opt(
+            child,
+            name + "." + name1 if name != "" else name1,
+            layer_to_replace,
+            org_layer_type,
+        )

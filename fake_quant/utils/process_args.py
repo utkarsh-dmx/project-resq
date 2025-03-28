@@ -282,7 +282,7 @@ def parser_gen():
 
     parser.add_argument("--flash_attn", action="store_true")
     parser.add_argument("--rotation_granularity", default="per_layer")
-    
+
     parser.add_argument("--train_rotations", action="store_true")
 
     # Experiments Arguments
@@ -297,6 +297,19 @@ def parser_gen():
         action=argparse.BooleanOptionalAction,
         default=False,
         help="calculates layerwise mean squared error of quantized input and full precision input",
+    )
+
+    parser.add_argument(
+        "--layerwise_kurt",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="calculates layerwise kurtosis of activations",
+    )
+    parser.add_argument(
+        "--layerwise_shapiro",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="calculates layerwise shapriro gausianity test probabilities of activations",
     )
     parser.add_argument(
         "--layer_idx", type=int, default=10, help="Which decoder layer to capture"
@@ -329,7 +342,7 @@ def process_args_ptq():
         ptq_args.optimized_rotation_path = model_args.optimized_rotation_path
     else:
         ptq_args.optimized_rotation_path = None
-    
+
     if model_args.optimized_basis_path is not None:
         ptq_args.optimized_basis_path = model_args.optimized_basis_path
     else:

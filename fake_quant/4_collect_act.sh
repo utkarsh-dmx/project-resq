@@ -7,7 +7,7 @@
 
 ### k_groupsize, v_groupsize = 64 only for Llama-3.2-1B else 128
 torchrun --nnodes=1 --nproc_per_node=1 --master_port=24556 collect_activations.py \
---input_model Qwen/Qwen2.5-3B \
+--input_model meta-llama/Meta-Llama-3-8B \
 --per_device_eval_batch_size 8 \
 --model_max_length 2048 \
 --fp16 False \
@@ -25,11 +25,10 @@ torchrun --nnodes=1 --nproc_per_node=1 --master_port=24556 collect_activations.p
 --k_groupsize 128 \
 --v_groupsize 128 \
 --high_fraction 0.125 \
---low_fraction 0.125 \
---optimized_basis_path ./rotation/U-wikitext-512-Qwen2.5-3B.bin \
---optimized_rotation_path ./rotation/R-high-0.125-low-0.125-sparse-0.0-Qwen2.5-3B.bin \
+--low_fraction 0.0 \
+--optimized_basis_path ./rotation/U-wikitext-512-Meta-Llama-3-8B.bin \
+--optimized_rotation_path ./rotation/R-high-0.125-low-0.0-sparse-0.0-Meta-Llama-3-8B.bin \
 --output_dir "output/" \
---rotate_mode 'resq' \
+--rotate_mode 'none' \
 --rotation_granularity 'full_shared' \
---layer_idx 26 \
---capture_layer_io \
+--layerwise_shapiro \

@@ -28,6 +28,7 @@ from utils import (
 )
 from tqdm import tqdm
 from mpl_toolkits.mplot3d import Axes3D
+from scipy.stats import shapiro
 
 import os
 from utils.utils import get_local_rank
@@ -45,6 +46,18 @@ FONTSIZE = 10
 font_config = {"font.size": FONTSIZE, "font.family": "Times New Roman"}
 plt.rcParams.update(font_config)
 plt.rcParams["figure.figsize"] = (4.5, 4.5)
+
+
+def kurtosis(tensor):
+    # calculates kurtosis along last dim and return mean across first dimension
+    # expects tensor to be a 2D matrix.
+
+    n = tensor[0].numel()  # Total number of elements along last dim
+    mean = torch.mean(tensor, dim=-1, keepdim=True)
+    std = torch.std(tensor, dim=-1, unbiased=False, keepdim=True)
+    # Kurtosis formula: E[(X - µ)^4] / ?^4
+    kurt = torch.mean(((tensor - mean) / std) ** 4)
+    return kurt
 
 
 @torch.no_grad()
@@ -123,6 +136,7 @@ def plot_layer_benchmark():
     plt.savefig("layer_benchmark.png", dpi=600)
     plt.clf()
 
+
 @torch.no_grad()
 def plot_e2e_decoder_benchmark():
 
@@ -172,9 +186,33 @@ def plot_e2e_decoder_benchmark():
     scatter_x_512 = np.arange(len(categories)) - 0.2
     scatter_x_8192 = np.arange(len(categories)) + 0.2
 
-    ax.scatter(scatter_x_512, int4_benchmark_512, color = "#5B88D3", s=100, marker='D', edgecolors="black")
-    ax.scatter(scatter_x_8192, int4_benchmark_8192, color = "#55a868", s=100, marker='D', edgecolors="black")
-    scatter_legend = mlines.Line2D([], [], linestyle='None', marker='D', markersize=10, color='white', markeredgecolor='black', markeredgewidth=1, label='INT4 Speedup')  # Only marker, no fill
+    ax.scatter(
+        scatter_x_512,
+        int4_benchmark_512,
+        color="#5B88D3",
+        s=100,
+        marker="D",
+        edgecolors="black",
+    )
+    ax.scatter(
+        scatter_x_8192,
+        int4_benchmark_8192,
+        color="#55a868",
+        s=100,
+        marker="D",
+        edgecolors="black",
+    )
+    scatter_legend = mlines.Line2D(
+        [],
+        [],
+        linestyle="None",
+        marker="D",
+        markersize=10,
+        color="white",
+        markeredgecolor="black",
+        markeredgewidth=1,
+        label="INT4 Speedup",
+    )  # Only marker, no fill
     # ax.scatter(scatter_x, int8_benchmark_512, color = "red", s=100, marker='D')
 
     # Adding data labels for each bar
@@ -183,7 +221,7 @@ def plot_e2e_decoder_benchmark():
             height = bar.get_height()
             ax.annotate(
                 f"{height}x",
-                xy=(bar.get_x() + bar.get_width() / 2, height-0.3),
+                xy=(bar.get_x() + bar.get_width() / 2, height - 0.3),
                 xytext=(0, 5),
                 textcoords="offset points",
                 ha="center",
@@ -200,7 +238,7 @@ def plot_e2e_decoder_benchmark():
     ax.set_ylabel("Speedup", fontsize=18, fontweight="bold")
     ax.set_xticks(x)
     ax.set_xticklabels(categories, fontsize=14)
-    ax.legend(handles = [bars1, bars2, scatter_legend], fontsize=14)
+    ax.legend(handles=[bars1, bars2, scatter_legend], fontsize=14)
 
     # Grid and Aesthetics
     ax.yaxis.grid(True, linestyle="--", alpha=0.7)
@@ -351,7 +389,7 @@ def plot_layer_activations_small(act, save_file_name):
     act_0 = act.min(axis=0)
     ax.set_ylim(-max, max)
     ax.fill_between(x, act_0, act_100, alpha=1.0, color="#38a4c8", label="min/max")
-    
+
     # ax.set_xlabel("Channel", labelpad=0)
     # ax.set_ylabel("Activation Value", labelpad=0)
 
@@ -552,12 +590,9 @@ def plot_mse_error(ptq_args):
     plt.clf()
 
 
-@torch.no_grad()
-def layerwise_mse(model_args, training_args, ptq_args, model, calib_data):
-    mse_attn = []
-    mse_mlp = []
-    snr_mlp = []
-    snr_attn = []
+def layerwise_kurtosis(model_args, training_args, ptq_args, model, calib_data):
+    kurt_attn = []
+    kurt_mlp = []
 
     dev = utils.DEV
 
@@ -568,7 +603,8 @@ def layerwise_mse(model_args, training_args, ptq_args, model, calib_data):
 
     layers = model.model.layers
     model.model.embed_tokens = model.model.embed_tokens.to(dev)
-    model.model.rotary_emb = model.model.rotary_emb.to(dev)
+    if hasattr(model.model, "rotary_emb"):
+        model.model.rotary_emb = model.model.rotary_emb.to(dev)
 
     layers[0] = layers[0].to(dev)
 
@@ -603,7 +639,10 @@ def layerwise_mse(model_args, training_args, ptq_args, model, calib_data):
             cache["i"] += 1
             cache["attention_mask"] = kwargs["attention_mask"]
             cache["position_ids"] = kwargs["position_ids"]
-            cache["position_embeddings"] = kwargs["position_embeddings"]
+            if "position_embeddings" in kwargs:
+                cache["position_embeddings"] = kwargs["position_embeddings"]
+            else:
+                cache["position_embeddings"] = None
 
             raise ValueError
 
@@ -619,7 +658,344 @@ def layerwise_mse(model_args, training_args, ptq_args, model, calib_data):
     layers[0] = layers[0].cpu()
 
     model.model.embed_tokens = model.model.embed_tokens.cpu()
-    model.model.rotary_emb = model.model.rotary_emb.cpu()
+    if hasattr(model.model, "rotary_emb"):
+        model.model.rotary_emb = model.model.rotary_emb.cpu()
+
+    position_ids = cache["position_ids"]
+
+    torch.cuda.empty_cache()
+    outs = [0] * nbatches
+    attention_mask = cache["attention_mask"]
+    position_embeddings = cache["position_embeddings"]
+
+    with torch.no_grad():
+        for i in tqdm(range(len(layers)), desc="(Evaluating Kurtosis)  Layers"):
+
+            layer = layers[i].to(dev)
+
+            # Dump the layer input and output
+            captured_io = model_utils.capture_layer_io(
+                layer, inps, attention_mask, position_ids, position_embeddings
+            )
+            dumped_inps = captured_io["input"]
+
+            inp_k = dumped_inps["k_proj"]
+            inp_up = dumped_inps["gate_proj"]
+
+            if ptq_args.rotate_mode == "resq" or ptq_args.rotate_mode == "quik":
+                high_fraction = ptq_args.high_fraction
+                hidden_size = model.config.hidden_size
+                high_dim = int(model.config.hidden_size * high_fraction)
+                last_dim = hidden_size - high_dim
+
+                kurt_k_uh = kurtosis(
+                    inp_k[..., last_dim:].view(-1, inp_k[..., last_dim:].shape[-1])
+                ).item()
+                kurt_k_ul = kurtosis(
+                    inp_k[..., :last_dim].view(-1, inp_k[..., :last_dim].shape[-1])
+                ).item()
+                kurt_k = (kurt_k_ul, kurt_k_uh)
+
+                kurt_up_uh = kurtosis(
+                    inp_up[..., last_dim:].view(-1, inp_up[..., last_dim:].shape[-1])
+                ).item()
+                kurt_up_ul = kurtosis(
+                    inp_up[..., :last_dim].view(-1, inp_up[..., :last_dim].shape[-1])
+                ).item()
+                kurt_up = (kurt_up_ul, kurt_up_uh)
+            else:
+                kurt_k = kurtosis(inp_k.view(-1, inp_k.shape[-1])).item()
+                kurt_up = kurtosis(inp_up.view(-1, inp_up.shape[-1])).item()
+
+            kurt_attn.append(kurt_k)
+            kurt_mlp.append(kurt_up)
+            del inp_k, inp_up, captured_io, dumped_inps
+            torch.cuda.empty_cache()
+
+            for j in range(nbatches):
+                outputs = layer(
+                    inps[j],
+                    attention_mask=attention_mask,
+                    #  defined.
+                    position_ids=position_ids,
+                    position_embeddings=position_embeddings,
+                )
+                outs[j] = outputs[0]
+            layers[i] = layer.cpu()
+            del layer
+            torch.cuda.empty_cache()
+            inps, outs = outs, inps
+
+        if model.model.norm is not None:
+            model.model.norm = model.model.norm.to(dev)
+
+        model.lm_head = model.lm_head.to(dev)
+        nlls = []
+        loss_fct = torch.nn.CrossEntropyLoss(reduction="none")
+        for i in range(nbatches):
+            hidden_states = inps[i]
+            if model.model.norm is not None:
+                hidden_states = model.model.norm(hidden_states)
+            lm_logits = model.lm_head(hidden_states)
+            shift_logits = lm_logits[:, :-1, :]
+            shift_labels = input_ids[i][:, 1:]
+            loss = loss_fct(shift_logits.permute(0, 2, 1), shift_labels)
+            neg_log_likelihood = loss.float().mean(dim=1)
+            nlls.append(neg_log_likelihood)
+        nlls_tensor = torch.cat(nlls)
+        ppl = torch.exp(nlls_tensor.mean())
+        model.config.use_cache = use_cache
+        logging.info(f"\n WikiText2 PPL: {ppl.item():.3f}")
+
+    return kurt_attn, kurt_mlp
+
+
+def layerwise_shapiro(model_args, training_args, ptq_args, model, calib_data):
+    shapiro_attn = []
+    shapiro_mlp = []
+
+    dev = utils.DEV
+
+    model.eval()
+
+    use_cache = model.config.use_cache
+    model.config.use_cache = False
+
+    layers = model.model.layers
+    model.model.embed_tokens = model.model.embed_tokens.to(dev)
+    if hasattr(model.model, "rotary_emb"):
+        model.model.rotary_emb = model.model.rotary_emb.to(dev)
+
+    layers[0] = layers[0].to(dev)
+
+    # Convert the whole text of evaluation dataset into batches of sequences.
+    input_ids = calib_data.input_ids  # (1, text_len)
+    nsamples = input_ids.numel() // model.seqlen  # The tail is truncated.
+    input_ids = (
+        input_ids[:, : nsamples * model.seqlen].view(nsamples, model.seqlen).to(dev)
+    )  # (nsamples, seqlen)
+
+    batch_size = ptq_args.bsz
+    input_ids = [input_ids[i : i + batch_size] for i in range(0, nsamples, batch_size)]
+    nbatches = len(input_ids)
+
+    dtype = next(iter(model.parameters())).dtype
+    # The input of the first decoder layer.
+    inps = torch.zeros(
+        (nbatches, batch_size, model.seqlen, model.config.hidden_size),
+        dtype=dtype,
+        device=dev,
+    )
+    inps = [0] * nbatches
+    cache = {"i": 0, "attention_mask": None}
+
+    class Catcher(torch.nn.Module):
+        def __init__(self, module):
+            super().__init__()
+            self.module = module
+
+        def forward(self, inp, **kwargs):
+            inps[cache["i"]] = inp
+            cache["i"] += 1
+            cache["attention_mask"] = kwargs["attention_mask"]
+            cache["position_ids"] = kwargs["position_ids"]
+            if "position_embeddings" in kwargs:
+                cache["position_embeddings"] = kwargs["position_embeddings"]
+            else:
+                cache["position_embeddings"] = None
+
+            raise ValueError
+
+    layers[0] = Catcher(layers[0])
+
+    for i in range(nbatches):
+        batch = input_ids[i]
+        try:
+            model(batch)
+        except ValueError:
+            pass
+    layers[0] = layers[0].module
+    layers[0] = layers[0].cpu()
+
+    model.model.embed_tokens = model.model.embed_tokens.cpu()
+    if hasattr(model.model, "rotary_emb"):
+        model.model.rotary_emb = model.model.rotary_emb.cpu()
+
+    position_ids = cache["position_ids"]
+
+    torch.cuda.empty_cache()
+    outs = [0] * nbatches
+    attention_mask = cache["attention_mask"]
+    position_embeddings = cache["position_embeddings"]
+
+    with torch.no_grad():
+        for i in tqdm(range(len(layers)), desc="(Evaluating Kurtosis)  Layers"):
+
+            layer = layers[i].to(dev)
+
+            # Dump the layer input and output
+            captured_io = model_utils.capture_layer_io(
+                layer, inps, attention_mask, position_ids, position_embeddings
+            )
+            dumped_inps = captured_io["input"]
+
+            inp_k = dumped_inps["k_proj"]
+            inp_up = dumped_inps["gate_proj"]
+
+            if ptq_args.rotate_mode == "resq" or ptq_args.rotate_mode == "quik":
+                high_fraction = ptq_args.high_fraction
+                hidden_size = model.config.hidden_size
+                high_dim = int(model.config.hidden_size * high_fraction)
+                last_dim = hidden_size - high_dim
+
+                _, shapiro_k_uh = shapiro(
+                    inp_k[..., last_dim:]
+                    .view(-1, inp_k[..., last_dim:].shape[-1])
+                    .float(),
+                    axis=-1,
+                )
+                _, shapiro_k_ul = shapiro(
+                    inp_k[..., :last_dim]
+                    .view(-1, inp_k[..., :last_dim].shape[-1])
+                    .float(),
+                    axis=-1,
+                )
+                shapiro_k = (shapiro_k_ul.mean(), shapiro_k_uh.mean())
+
+                _, shapiro_up_uh = shapiro(
+                    inp_up[..., last_dim:]
+                    .view(-1, inp_up[..., last_dim:].shape[-1])
+                    .float(),
+                    axis=-1,
+                )
+                _, shapiro_up_ul = shapiro(
+                    inp_up[..., :last_dim].view(-1, inp_up[..., :last_dim].shape[-1])
+                )
+                shapiro_up = (shapiro_up_ul.mean(), shapiro_up_uh.mean())
+            else:
+                _, shapiro_k = shapiro(inp_k.view(-1, inp_k.shape[-1]).float(), axis=-1)
+                shapiro_k = shapiro_k.mean()
+                _, shapiro_up = shapiro(
+                    inp_up.view(-1, inp_up.shape[-1]).float(), axis=-1
+                )
+                shapiro_up = shapiro_up.mean()
+
+            shapiro_attn.append(shapiro_k)
+            shapiro_attn.append(shapiro_up)
+            del inp_k, inp_up, captured_io, dumped_inps
+            torch.cuda.empty_cache()
+
+            for j in range(nbatches):
+                outputs = layer(
+                    inps[j],
+                    attention_mask=attention_mask,
+                    #  defined.
+                    position_ids=position_ids,
+                    position_embeddings=position_embeddings,
+                )
+                outs[j] = outputs[0]
+            layers[i] = layer.cpu()
+            del layer
+            torch.cuda.empty_cache()
+            inps, outs = outs, inps
+
+        if model.model.norm is not None:
+            model.model.norm = model.model.norm.to(dev)
+
+        model.lm_head = model.lm_head.to(dev)
+        nlls = []
+        loss_fct = torch.nn.CrossEntropyLoss(reduction="none")
+        for i in range(nbatches):
+            hidden_states = inps[i]
+            if model.model.norm is not None:
+                hidden_states = model.model.norm(hidden_states)
+            lm_logits = model.lm_head(hidden_states)
+            shift_logits = lm_logits[:, :-1, :]
+            shift_labels = input_ids[i][:, 1:]
+            loss = loss_fct(shift_logits.permute(0, 2, 1), shift_labels)
+            neg_log_likelihood = loss.float().mean(dim=1)
+            nlls.append(neg_log_likelihood)
+        nlls_tensor = torch.cat(nlls)
+        ppl = torch.exp(nlls_tensor.mean())
+        model.config.use_cache = use_cache
+        logging.info(f"\n WikiText2 PPL: {ppl.item():.3f}")
+
+    return shapiro_attn, shapiro_attn
+
+
+@torch.no_grad()
+def layerwise_mse(model_args, training_args, ptq_args, model, calib_data):
+    mse_attn = []
+    mse_mlp = []
+    snr_mlp = []
+    snr_attn = []
+
+    dev = utils.DEV
+
+    model.eval()
+
+    use_cache = model.config.use_cache
+    model.config.use_cache = False
+
+    layers = model.model.layers
+    model.model.embed_tokens = model.model.embed_tokens.to(dev)
+    if hasattr(model.model, "rotary_emb"):
+        model.model.rotary_emb = model.model.rotary_emb.to(dev)
+
+    layers[0] = layers[0].to(dev)
+
+    # Convert the whole text of evaluation dataset into batches of sequences.
+    input_ids = calib_data.input_ids  # (1, text_len)
+    nsamples = input_ids.numel() // model.seqlen  # The tail is truncated.
+    input_ids = (
+        input_ids[:, : nsamples * model.seqlen].view(nsamples, model.seqlen).to(dev)
+    )  # (nsamples, seqlen)
+
+    batch_size = ptq_args.bsz
+    input_ids = [input_ids[i : i + batch_size] for i in range(0, nsamples, batch_size)]
+    nbatches = len(input_ids)
+
+    dtype = next(iter(model.parameters())).dtype
+    # The input of the first decoder layer.
+    inps = torch.zeros(
+        (nbatches, batch_size, model.seqlen, model.config.hidden_size),
+        dtype=dtype,
+        device=dev,
+    )
+    inps = [0] * nbatches
+    cache = {"i": 0, "attention_mask": None}
+
+    class Catcher(torch.nn.Module):
+        def __init__(self, module):
+            super().__init__()
+            self.module = module
+
+        def forward(self, inp, **kwargs):
+            inps[cache["i"]] = inp
+            cache["i"] += 1
+            cache["attention_mask"] = kwargs["attention_mask"]
+            cache["position_ids"] = kwargs["position_ids"]
+            if "position_embeddings" in kwargs:
+                cache["position_embeddings"] = kwargs["position_embeddings"]
+            else:
+                cache["position_embeddings"] = None
+
+            raise ValueError
+
+    layers[0] = Catcher(layers[0])
+
+    for i in range(nbatches):
+        batch = input_ids[i]
+        try:
+            model(batch)
+        except ValueError:
+            pass
+    layers[0] = layers[0].module
+    layers[0] = layers[0].cpu()
+
+    model.model.embed_tokens = model.model.embed_tokens.cpu()
+    if hasattr(model.model, "rotary_emb"):
+        model.model.rotary_emb = model.model.rotary_emb.cpu()
     position_ids = cache["position_ids"]
 
     torch.cuda.empty_cache()
@@ -809,7 +1185,10 @@ def collect_act():
             torch_dtype=dtype,
             config=config,
         )
-    elif "qwen2" in model_args.input_model.lower() and "vl" not in model_args.input_model.lower():
+    elif (
+        "qwen2" in model_args.input_model.lower()
+        and "vl" not in model_args.input_model.lower()
+    ):
         model = Qwen2ForCausalLM.from_pretrained(
             pretrained_model_name_or_path=model_args.input_model,
             torch_dtype=dtype,
@@ -946,6 +1325,137 @@ def collect_act():
             )
 
             # plot_mse_error(ptq_args)
+    if ptq_args.layerwise_kurt:
+        with torch.no_grad():
+
+            if ptq_args.rotate_mode != "none":
+                fuse_norm_utils.fuse_layer_norms(model)
+                if not (
+                    ptq_args.rotate_mode == "quarot"
+                    or ptq_args.rotate_mode == "spinquant"
+                ):
+                    rotation_utils.fuse_basis_to_model(model, ptq_args)
+                else:
+                    rotation_utils.rotate_model(model, ptq_args)
+                if not (
+                    ptq_args.rotate_mode == "quarot"
+                    or ptq_args.rotate_mode == "spinquant"
+                ):
+                    rotation_utils.rearrange_columns(model, ptq_args, False)
+
+                utils.cleanup_memory(verbos=True)
+                quant_utils.add_actquant(model)  # Add Activation Wrapper to the model
+                qlayers = quant_utils.find_qlayers(model)
+                for name in qlayers:
+                    if "down_proj" in name:
+                        had_K, K = hadamard_utils.get_hadK(
+                            model.config.intermediate_size
+                        )
+                        no_had = False
+                        qlayers[name].online_full_had = True
+                        qlayers[name].had_K = had_K
+                        qlayers[name].K = K
+                        qlayers[name].fp32_had = ptq_args.fp32_had
+                        qlayers[name].no_had = no_had
+
+            else:
+                quant_utils.add_actquant(
+                    model
+                )  # Add Activation Wrapper to the model as the rest of the code assumes it is present
+
+            kurt_attn, kurt_mlp = layerwise_kurtosis(
+                model_args, training_args, ptq_args, model, calib_data
+            )
+
+            save_path_attn_kurt = os.path.join(
+                ptq_args.output_dir, ptq_args.rotate_mode, "attn_kurt.pt"
+            )
+
+            save_path_mlp_kurt = os.path.join(
+                ptq_args.output_dir, ptq_args.rotate_mode, "mlp_kurt.pt"
+            )
+
+            os.makedirs(os.path.dirname(save_path_attn_kurt), exist_ok=True)
+            os.makedirs(os.path.dirname(save_path_mlp_kurt), exist_ok=True)
+
+            torch.save(kurt_attn, save_path_attn_kurt)
+            torch.save(kurt_mlp, save_path_mlp_kurt)
+            print(
+                f"Rotate Mode : {ptq_args.rotate_mode} || kurt attn = {kurt_attn} || kurt mlp = {kurt_mlp}"
+            )
+            print("kurt_attn \n")
+            for i in range(len(kurt_attn)):
+                print(kurt_attn[i])
+
+            print("kurt_mlp \n")
+            for i in range(len(kurt_mlp)):
+                print(kurt_mlp[i])
+
+    if ptq_args.layerwise_shapiro:
+        with torch.no_grad():
+
+            if ptq_args.rotate_mode != "none":
+                fuse_norm_utils.fuse_layer_norms(model)
+                if not (
+                    ptq_args.rotate_mode == "quarot"
+                    or ptq_args.rotate_mode == "spinquant"
+                ):
+                    rotation_utils.fuse_basis_to_model(model, ptq_args)
+                else:
+                    rotation_utils.rotate_model(model, ptq_args)
+                if not (
+                    ptq_args.rotate_mode == "quarot"
+                    or ptq_args.rotate_mode == "spinquant"
+                ):
+                    rotation_utils.rearrange_columns(model, ptq_args, False)
+
+                utils.cleanup_memory(verbos=True)
+                quant_utils.add_actquant(model)  # Add Activation Wrapper to the model
+                qlayers = quant_utils.find_qlayers(model)
+                for name in qlayers:
+                    if "down_proj" in name:
+                        had_K, K = hadamard_utils.get_hadK(
+                            model.config.intermediate_size
+                        )
+                        no_had = False
+                        qlayers[name].online_full_had = True
+                        qlayers[name].had_K = had_K
+                        qlayers[name].K = K
+                        qlayers[name].fp32_had = ptq_args.fp32_had
+                        qlayers[name].no_had = no_had
+
+            else:
+                quant_utils.add_actquant(
+                    model
+                )  # Add Activation Wrapper to the model as the rest of the code assumes it is present
+
+            shapiro_attn, shapiro_mlp = layerwise_shapiro(
+                model_args, training_args, ptq_args, model, calib_data
+            )
+
+            save_path_attn_kurt = os.path.join(
+                ptq_args.output_dir, ptq_args.rotate_mode, "attn_kurt.pt"
+            )
+
+            save_path_mlp_kurt = os.path.join(
+                ptq_args.output_dir, ptq_args.rotate_mode, "mlp_kurt.pt"
+            )
+
+            os.makedirs(os.path.dirname(save_path_attn_kurt), exist_ok=True)
+            os.makedirs(os.path.dirname(save_path_mlp_kurt), exist_ok=True)
+
+            torch.save(shapiro_attn, save_path_attn_kurt)
+            torch.save(shapiro_mlp, save_path_mlp_kurt)
+            print(
+                f"Rotate Mode : {ptq_args.rotate_mode} || Shapiro prob attn = {shapiro_attn} || Shapiro prob mlp = {shapiro_mlp}"
+            )
+            print("Shapiro prob attn")
+            for i in range(len(shapiro_attn)):
+                print(shapiro_attn[i])
+
+            print("Shapiro prob mlp ")
+            for i in range(len(shapiro_mlp)):
+                print(shapiro_mlp[i])
 
 
 if __name__ == "__main__":
